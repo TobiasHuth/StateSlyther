@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 import xml.etree.ElementTree as ET
 import tkinter.filedialog as fd
+from code_generators import show_code_editor
 
 class GraphicalMaster(tk.Tk):
     def __init__(self):
@@ -18,9 +19,12 @@ class GraphicalMaster(tk.Tk):
         self._clicked_code_id = None  # Track if code was clicked
         self._clicked_condition_id = None  # Track if condition was clicked
         self.default_state = None  # Track the default state
+        self.language_var = tk.StringVar(value="python")  # Track the code generation language
+        self.language = "python"  # Track the code generation language
         self.edges = {}  # Track edges with their conditions: edge_id -> {'condition': str, 'condition_text_id': id, ...}
         self.nodes = {}  # item_id: {'position': (x,y), 'size': (w,h), 'type': 'state'/'junction', 'name': str, 'text_id': item_id, 'incoming': [edge_ids], 'outgoing': [edge_ids], 'incoming_points': {edge_id: (rel_x, rel_y)}, 'outgoing_points': {edge_id: (rel_x, rel_y)}}
         self._resize_handle = None
+        self._pan_start = None  # Track pan start position for middle mouse button
 
         self._build_ui()
 
@@ -41,6 +45,18 @@ class GraphicalMaster(tk.Tk):
         chart_menu.add_command(label="Show Connections", command=self.show_connections)
         chart_menu.add_command(label="Clear", command=lambda: self.canvas.delete("shape"))
         
+        # Code menu
+        code_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Code", menu=code_menu)
+        
+        # Language submenu
+        language_menu = tk.Menu(code_menu, tearoff=0)
+        code_menu.add_cascade(label="Set Language", menu=language_menu)
+        language_menu.add_radiobutton(label="Python", variable=self.language_var, value="python", command=lambda: self.set_language("python"))
+        language_menu.add_radiobutton(label="C", variable=self.language_var, value="C", command=lambda: self.set_language("C"))
+        
+        code_menu.add_command(label="Update/Show Code", command=self.show_generated_code)
+        
         toolbar = ttk.Frame(self)
         toolbar.pack(side="top", fill="x")
 
@@ -48,17 +64,138 @@ class GraphicalMaster(tk.Tk):
             btn = ttk.Button(toolbar, text=m.capitalize(), command=lambda mm=m: self.set_mode(mm))
             btn.pack(side="left", padx=4, pady=4)
 
-        ttk.Button(toolbar, text="Set as Default", command=self.set_default_state).pack(side="left", padx=4)
+        self.default_btn = ttk.Button(toolbar, text="Set as Default", command=self.set_default_state, state="disabled")
+        self.default_btn.pack(side="left", padx=4)
 
-        self.canvas = tk.Canvas(self, bg="white", cursor="arrow")
-        self.canvas.pack(fill="both", expand=True)
+        # Create canvas frame with scrollbars
+        canvas_frame = ttk.Frame(self)
+        canvas_frame.pack(fill="both", expand=True)
+        
+        # Create scrollbars
+        v_scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical")
+        v_scrollbar.pack(side="right", fill="y")
+        
+        h_scrollbar = ttk.Scrollbar(canvas_frame, orient="horizontal")
+        h_scrollbar.pack(side="bottom", fill="x")
+        
+        # Create canvas with scrollbar configuration
+        self.canvas = tk.Canvas(canvas_frame, bg="white", cursor="arrow", yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        self.canvas.pack(fill="both", expand=True, side="left")
+        
+        # Configure scrollbars to work with canvas
+        v_scrollbar.config(command=self.canvas.yview)
+        h_scrollbar.config(command=self.canvas.xview)
+        
+        # Configure canvas scrolling region with large initial area to allow expansion
+        self.canvas.config(scrollregion="-5000 -5000 5000 5000")
 
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_move)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
-        self.canvas.bind("<Double-Button-1>", self.on_double_click)
+        # self.canvas.bind("<Double-Button-1>", self.on_double_click)
         self.canvas.bind("<Button-3>", lambda event: self.set_mode("select"))
+        self.canvas.bind("<ButtonPress-2>", self.on_pan_start)
+        self.canvas.bind("<B2-Motion>", self.on_pan_move)
+        self.canvas.bind("<ButtonRelease-2>", self.on_pan_end)
         self.bind("<Delete>", lambda event: self.delete_selected())
+        self.bind("<space>", lambda event: self.focus_diagram())
+
+    def update_scroll_region(self):
+        """Update the canvas scroll region to fit all content with padding."""
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            # Add padding around content
+            padding = 500
+            scroll_region = (
+                int(bbox[0] - padding),
+                int(bbox[1] - padding),
+                int(bbox[2] + padding),
+                int(bbox[3] + padding)
+            )
+        else:
+            # Default large area if no content
+            scroll_region = "-5000 -5000 5000 5000"
+        self.canvas.config(scrollregion=scroll_region)
+
+    def on_pan_start(self, event):
+        """Start panning - store the initial mouse position and clear other states."""
+        # Clear any previous interaction states to prevent interference
+        self._drag_start = None
+        self._dragging = False
+        self._clicked_text_id = None
+        self._clicked_code_id = None
+        self._clicked_condition_id = None
+        self._resize_handle = None
+        self._temp = None
+        self._pan_start = (event.x, event.y)
+        self.canvas.config(cursor="hand2")
+
+    def on_pan_move(self, event):
+        """Pan the canvas by scrolling based on mouse movement."""
+        if self._pan_start:
+            # Calculate the distance moved in pixels
+            dx = event.x - self._pan_start[0]
+            dy = event.y - self._pan_start[1]
+            
+            # Get the current scroll position
+            x_view = self.canvas.xview()
+            y_view = self.canvas.yview()
+            
+            # Get scroll region and canvas dimensions
+            scroll_region = self.canvas.cget("scrollregion").split()
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            
+            if scroll_region and canvas_width > 1 and canvas_height > 1:
+                region_width = float(scroll_region[2]) - float(scroll_region[0])
+                region_height = float(scroll_region[3]) - float(scroll_region[1])
+                
+                # Calculate new scroll position based on pixel movement
+                new_x = x_view[0] - (dx / region_width)  
+                new_y = y_view[0] - (dy / region_height) 
+
+                # Clamp values to valid range [0, 1]
+                new_x = max(0, min(1, new_x))
+                new_y = max(0, min(1, new_y))
+                
+                # Apply the new scroll position
+                self.canvas.xview_moveto(new_x)
+                self.canvas.yview_moveto(new_y)
+            
+            # Update pan start position for next movement
+            self._pan_start = (event.x, event.y)
+
+    def on_pan_end(self, event):
+        """End panning."""
+        self._pan_start = None
+        self.canvas.config(cursor="arrow")
+
+    def focus_diagram(self):
+        """Pan to show the top-left most item of the diagram in the top-left corner of the visible canvas."""
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            # Get scroll region
+            scroll_region = self.canvas.cget("scrollregion").split()
+            region_x0 = float(scroll_region[0])
+            region_y0 = float(scroll_region[1])
+            region_width = float(scroll_region[2]) - region_x0
+            region_height = float(scroll_region[3]) - region_y0
+            
+            # Get top-left corner of the diagram
+            top_left_x = bbox[0]
+            top_left_y = bbox[1]
+            
+            # Calculate scroll position as fraction [0, 1]
+            scroll_x = (top_left_x - region_x0) / region_width
+            scroll_y = (top_left_y - region_y0) / region_height
+            
+            # Clamp to valid range
+            scroll_x = max(0, min(1, scroll_x))
+            scroll_y = max(0, min(1, scroll_y))
+            
+            # Apply scroll position
+            self.canvas.xview_moveto(scroll_x)
+            self.canvas.yview_moveto(scroll_y)
 
     def set_mode(self, mode):
         self.mode = mode
@@ -93,7 +230,7 @@ class GraphicalMaster(tk.Tk):
         return cx, cy
 
     def on_mouse_down(self, event):
-        x, y = event.x, event.y
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         if self.mode == "select":
             item = self.canvas.find_closest(x, y)
             if item and "edge" in self.canvas.gettags(item):
@@ -154,7 +291,7 @@ class GraphicalMaster(tk.Tk):
                 self._temp = self.canvas.create_oval(x, y, x, y, outline="black", tags=("shape","node","temp"))
 
     def on_mouse_move(self, event):
-        x, y = event.x, event.y
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
         # If dragging occurs, set flag and clear the clicked flags
         if self._drag_start:
             self._dragging = True
@@ -283,7 +420,7 @@ class GraphicalMaster(tk.Tk):
                 self.set_mode("select")
         elif self.mode == "line" and self._start:
             # Check if ending on a different shape
-            x, y = event.x, event.y
+            x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
             item = self.canvas.find_closest(x, y)
             if item and "node" in self.canvas.gettags(item) and item[0] != self._start_shape:
                 bbox = self.canvas.bbox(item[0])
@@ -339,6 +476,7 @@ class GraphicalMaster(tk.Tk):
         self._drag_start = None
         self._dragging = False
         self._resize_handle = None
+        self.update_scroll_region()
 
     def on_double_click(self, event):
         # quick toggle fill on double click of a shape
@@ -356,7 +494,14 @@ class GraphicalMaster(tk.Tk):
         if "edge" in tags:
             # Highlight selected edge with thicker line and different color
             self.canvas.itemconfig(item_id, fill="red", width=4)
+            self.default_btn.config(state="disabled")
         else:
+            # If this is a state, enable the button
+            if self.nodes[item_id]['type'] == 'state':
+                self.default_btn.config(state="normal")
+            else:
+                self.default_btn.config(state="disabled")
+            
             # If this is the default state, use green outline, otherwise red
             if self.default_state == item_id:
                 self.canvas.itemconfig(item_id, outline="green", width=2)
@@ -379,6 +524,7 @@ class GraphicalMaster(tk.Tk):
             except tk.TclError:
                 pass
         self.selected = None
+        self.default_btn.config(state="disabled")
 
     def get_condition_text_color(self, text):
         """Determine text color based on whether condition starts with comment symbol"""
@@ -417,6 +563,7 @@ class GraphicalMaster(tk.Tk):
                     self.canvas.coords(self.edges[edge_id]['condition_text_id'], mid_x, mid_y)
                     # Update condition background to match text
                     self.update_condition_bg(edge_id)
+        self.update_scroll_region()
 
     def delete_selected(self):
         if self.selected:
@@ -658,15 +805,30 @@ class GraphicalMaster(tk.Tk):
                 to_name = self.nodes[int(end_id)]['name'] if self.nodes[int(end_id)]['type'] == 'state' else 'Junction'
                 tree.insert("", "end", values=(from_name, to_name, edge_id))
 
+    def set_language(self, language):
+        """Set the code generation language."""
+        self.language = language
+        self.language_var.set(language)
+        
+    def show_generated_code(self):
+        """Open a window showing the generated code."""
+        show_code_editor(self, self.nodes, self.edges, self.default_state, self.language)
+
     def save_layout(self):
         file = fd.asksaveasfilename(defaultextension=".lyt", filetypes=[("Layout files", "*.lyt")])
         if file:
             root = ET.Element("layout")
+            # Save language setting
+            ET.SubElement(root, "language", value=self.language)
             # Save default state id
             if self.default_state is not None:
                 ET.SubElement(root, "default_state", id=str(self.default_state))
             for item_id, data in self.nodes.items():
-                ET.SubElement(root, "node", id=str(item_id), x=str(data['position'][0]), y=str(data['position'][1]), w=str(data['size'][0]), h=str(data['size'][1]), type=data['type'], name=str(data['name']))
+                node_elem = ET.SubElement(root, "node", id=str(item_id), x=str(data['position'][0]), y=str(data['position'][1]), w=str(data['size'][0]), h=str(data['size'][1]), type=data['type'], name=str(data['name']))
+                # Save code for states
+                if data['type'] == 'state' and 'code' in data:
+                    code_elem = ET.SubElement(node_elem, "code")
+                    code_elem.text = data['code']
             for edge_id in self.canvas.find_withtag("edge"):
                 tags = self.canvas.gettags(edge_id)
                 start_id = None
@@ -679,7 +841,11 @@ class GraphicalMaster(tk.Tk):
                 if start_id and end_id:
                     rel_start = self.nodes[int(start_id)]['outgoing_points'][edge_id]
                     rel_end = self.nodes[int(end_id)]['incoming_points'][edge_id]
-                    ET.SubElement(root, "edge", start=start_id, end=end_id, start_rel_x=str(rel_start[0]), start_rel_y=str(rel_start[1]), end_rel_x=str(rel_end[0]), end_rel_y=str(rel_end[1]))
+                    edge_elem = ET.SubElement(root, "edge", start=start_id, end=end_id, start_rel_x=str(rel_start[0]), start_rel_y=str(rel_start[1]), end_rel_x=str(rel_end[0]), end_rel_y=str(rel_end[1]))
+                    # Save condition if exists
+                    if edge_id in self.edges and 'condition' in self.edges[edge_id]:
+                        condition_elem = ET.SubElement(edge_elem, "condition")
+                        condition_elem.text = self.edges[edge_id]['condition']
             tree = ET.ElementTree(root)
             tree.write(file)
 
@@ -692,6 +858,13 @@ class GraphicalMaster(tk.Tk):
             tree = ET.parse(file)
             root = tree.getroot()
             saved_to_new = {}
+            
+            # Restore language setting
+            language_elem = root.find("language")
+            if language_elem is not None:
+                self.language = language_elem.get("value", "python")
+                self.language_var.set(self.language)
+            
             # Restore default state id
             default_elem = root.find("default_state")
             default_state_id = int(default_elem.get("id")) if default_elem is not None else None
@@ -708,12 +881,20 @@ class GraphicalMaster(tk.Tk):
                     item = self.canvas.create_rectangle(x, y, x+w, y+h, outline="black", tags=("shape","node"))
                 elif typ in ("oval", "junction"):
                     item = self.canvas.create_oval(x, y, x+w, y+h, outline="black", tags=("shape","node"))
+                
+                # Load saved code or use default
+                code_elem = node_elem.find("code")
+                if code_elem is not None and code_elem.text:
+                    saved_code = code_elem.text
+                else:
+                    saved_code = "// code executed once on entry of the state\nentry:\n\n// cyclic execution as long as state is active\nduring:\n\n// code executed when exiting the state\nexit:" if typ in ("rect", "state") else ''
+                
                 self.nodes[item] = {
                     'position': (x, y),
                     'size': (w, h),
                     'type': 'state' if typ in ("rect", "state") else 'junction',
                     'name': name,
-                    'code': "// code executed once on entry of the state\nentry:\n\n// cyclic execution as long as state is active\nduring:\n\n// code executed when exiting the state\nexit:" if typ in ("rect", "state") else '',
+                    'code': saved_code,
                     'incoming': [],
                     'outgoing': [],
                     'incoming_points': {},
@@ -749,6 +930,37 @@ class GraphicalMaster(tk.Tk):
                 self.nodes[actual_end]['incoming'].append(edge_id)
                 self.nodes[actual_start]['outgoing_points'][edge_id] = (rel_start_x, rel_start_y)
                 self.nodes[actual_end]['incoming_points'][edge_id] = (rel_end_x, rel_end_y)
+                
+                # Restore condition if it exists
+                condition_elem = edge_elem.find("condition")
+                condition_text = condition_elem.text if condition_elem is not None and condition_elem.text else "//[condition]"
+                
+                # Create condition text at midpoint
+                mid_x = (abs_start_x + abs_end_x) / 2
+                mid_y = (abs_start_y + abs_end_y) / 2
+                
+                condition_color = self.get_condition_text_color(condition_text)
+                condition_text_id = self.canvas.create_text(mid_x, mid_y, text=condition_text, font=("Courier", 9), fill=condition_color, tags=("shape", "condition", f"condition_of:{edge_id}"))
+                
+                # Create gray background rectangle for the text
+                text_bbox = self.canvas.bbox(condition_text_id)
+                bg_rect_id = None
+                if text_bbox:
+                    bg_rect_id = self.canvas.create_rectangle(
+                        text_bbox[0] - 3, text_bbox[1] - 3, text_bbox[2] + 3, text_bbox[3] + 3,
+                        fill="#e9e9e9", outline="#849eaf", tags=("shape", "condition_bg")
+                    )
+                    # Lower the rectangle behind the text
+                    self.canvas.tag_lower(bg_rect_id, condition_text_id)
+                
+                # Store edge data
+                self.edges[edge_id] = {
+                    'condition': condition_text,
+                    'condition_text_id': condition_text_id,
+                    'condition_bg_id': bg_rect_id,
+                    'start_pos': (abs_start_x, abs_start_y),
+                    'end_pos': (abs_end_x, abs_end_y)
+                }
 
 if __name__ == "__main__":
     app = GraphicalMaster()
