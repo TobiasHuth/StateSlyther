@@ -23,6 +23,8 @@ class GraphicalMaster(tk.Tk):
         self.language = "python"  # Track the code generation language
         self.edges = {}  # Track edges with their conditions: edge_id -> {'condition': str, 'condition_text_id': id, ...}
         self.nodes = {}  # item_id: {'position': (x,y), 'size': (w,h), 'type': 'state'/'junction', 'name': str, 'text_id': item_id, 'incoming': [edge_ids], 'outgoing': [edge_ids], 'incoming_points': {edge_id: (rel_x, rel_y)}, 'outgoing_points': {edge_id: (rel_x, rel_y)}}
+        self.logical_connections = {}  # Logical connections: (start_state_id, end_state_id) -> list of edge_id lists and conditions
+        self.symbols = {}  # Symbol dictionary: symbol_name -> {'type': 'input'/'output'/'local', 'description': str}
         self._resize_handle = None
         self._pan_start = None  # Track pan start position for middle mouse button
 
@@ -43,6 +45,7 @@ class GraphicalMaster(tk.Tk):
         chart_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Chart", menu=chart_menu)
         chart_menu.add_command(label="Show Connections", command=self.show_connections)
+        chart_menu.add_command(label="Edit Symbols", command=self.edit_symbols)
         chart_menu.add_command(label="Clear", command=lambda: self.canvas.delete("shape"))
         
         # Code menu
@@ -784,15 +787,8 @@ class GraphicalMaster(tk.Tk):
             # Lower the code area behind the rectangle so clicks affect the state
             self.canvas.tag_lower(code_id, item_id)
 
-    def show_connections(self):
-        win = tk.Toplevel(self)
-        win.title("Connections")
-        tree = ttk.Treeview(win, columns=("From", "To", "Condition"), show="headings")
-        tree.heading("From", text="From")
-        tree.heading("To", text="To")
-        tree.heading("Condition", text="Condition")
-        tree.pack(fill="both", expand=True)
-        
+    def _analyze_logical_connections(self):
+        """Analyze and build the logical_connections dictionary from the chart."""
         # Build a map of edges by their start and end nodes
         edge_map = {}
         for edge_id in self.canvas.find_withtag("edge"):
@@ -843,7 +839,6 @@ class GraphicalMaster(tk.Tk):
             return all_paths
         
         # Process all edges and build state-to-state connections
-        processed_edge_ids = set()
         connections = {}  # (start_state, end_state) -> list of edge_id lists
         
         # For each edge in the graph
@@ -868,9 +863,15 @@ class GraphicalMaster(tk.Tk):
                         connections[key] = []
                     connections[key].append(edge_ids)
         
-        # Display all unique connections
+        # Store logical connections for later use
+        self.logical_connections = {}
+        
+        # Build logical connections with combined conditions
         for (start_id, end_id), all_edge_lists in connections.items():
-            # For each unique path, display it with combined conditions
+            # Store this connection mapping
+            self.logical_connections[(start_id, end_id)] = []
+            
+            # For each unique path, calculate combined conditions
             for edge_list in all_edge_lists:
                 conditions = []
                 for edge_id in edge_list:
@@ -881,13 +882,236 @@ class GraphicalMaster(tk.Tk):
                 
                 # Combine all conditions with AND
                 if conditions:
-                    combined_condition = " AND ".join(f"({cond})" if " " in cond else cond for cond in conditions)
+                    combined_condition = " and ".join(f"({cond})" if " " in cond else cond for cond in conditions)
                 else:
                     combined_condition = "//[condition]"
                 
+                # Store the edge list and combined condition
+                self.logical_connections[(start_id, end_id)].append({
+                    'edges': edge_list,
+                    'condition': combined_condition
+                })
+
+    def show_connections(self):
+        # Analyze logical connections first
+        self._analyze_logical_connections()
+        
+        win = tk.Toplevel(self)
+        win.title("Connections")
+        tree = ttk.Treeview(win, columns=("From", "To", "Condition"), show="headings")
+        tree.heading("From", text="From")
+        tree.heading("To", text="To")
+        tree.heading("Condition", text="Condition")
+        tree.pack(fill="both", expand=True)
+        
+        # Display all unique connections
+        for (start_id, end_id), connections_list in self.logical_connections.items():
+            for conn in connections_list:
                 from_name = self.nodes[start_id]['name']
                 to_name = self.nodes[end_id]['name']
-                tree.insert("", "end", values=(from_name, to_name, combined_condition))
+                condition = conn.get('condition', '//[condition]')
+                tree.insert("", "end", values=(from_name, to_name, condition))
+
+    def get_symbols(self):
+        """Extract symbols from all code sections of states and transitional logic."""
+        symbols = {}
+        
+        # Extract symbols from state code (entry, during, exit sections)
+        for node_id, node_data in self.nodes.items():
+            if node_data['type'] == 'state':
+                code = node_data.get('code', '')
+                if code:
+                    # Extract variable names from code
+                    self._extract_symbols_from_text(code, symbols)
+        
+        # Extract symbols from transition conditions
+        for (start_id, end_id), connections in self.logical_connections.items():
+            for conn in connections:
+                condition = conn.get('condition', '')
+                if condition:
+                    self._extract_symbols_from_text(condition, symbols)
+        
+        return symbols
+    
+    def _extract_symbols_from_text(self, text, symbols_dict):
+        """Helper method to extract variable names from text."""
+        import re
+        
+        # Remove comments from each line
+        lines = text.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            # Remove comments starting with //, #, or %
+            for comment_marker in ('//', '#', '%'):
+                if comment_marker in line:
+                    line = line[:line.index(comment_marker)]
+            cleaned_lines.append(line)
+        text = '\n'.join(cleaned_lines)
+        
+        # Pattern for variable assignments (var = value)
+        assign_pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*='
+        for match in re.finditer(assign_pattern, text):
+            var_name = match.group(1)
+            if var_name not in symbols_dict and not self._is_keyword(var_name):
+                symbols_dict[var_name] = {'type': 'local', 'description': ''}
+        
+        # Pattern for variable usage in conditions and expressions
+        usage_pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b'
+        for match in re.finditer(usage_pattern, text):
+            var_name = match.group(1)
+            if var_name not in symbols_dict and not self._is_keyword(var_name) and not self._is_builtin(var_name):
+                symbols_dict[var_name] = {'type': 'input', 'description': ''}
+    
+    def _is_keyword(self, name):
+        """Check if name is a Python keyword."""
+        keywords = {'if', 'else', 'elif', 'for', 'while', 'break', 'continue', 'return', 
+                   'def', 'class', 'import', 'from', 'as', 'try', 'except', 'finally',
+                   'with', 'pass', 'and', 'or', 'not', 'in', 'is', 'None', 'True', 'False', 'entry', 'during', 'exit'}
+        return name in keywords
+    
+    def _is_builtin(self, name):
+        """Check if name is a Python builtin function."""
+        builtins = {'print', 'len', 'range', 'str', 'int', 'float', 'bool', 'list', 
+                   'dict', 'set', 'tuple', 'sum', 'max', 'min', 'abs', 'round', 'sorted',
+                   'enumerate', 'zip', 'map', 'filter', 'type', 'isinstance', 'super'}
+        return name in builtins
+    
+    def edit_symbols(self):
+        """Open a window to edit the symbols dictionary."""
+        # Analyze logical connections to build the graph
+        self._analyze_logical_connections()
+        
+        # Get all symbols from code and merge with existing
+        extracted = self.get_symbols()
+        for sym_name, sym_data in extracted.items():
+            if sym_name not in self.symbols:
+                self.symbols[sym_name] = sym_data
+        
+        # Create symbols edit window
+        sym_window = tk.Toplevel(self)
+        sym_window.title("Edit Symbols")
+        sym_window.geometry("600x450")
+        
+        # Create frame for symbol list
+        list_frame = ttk.Frame(sym_window)
+        list_frame.pack(fill="both", expand=True, padx=5, pady=(5, 0))
+        
+        # Create treeview to display symbols
+        tree = ttk.Treeview(list_frame, columns=("Name", "Type", "Description"), show="headings", height=15)
+        tree.heading("Name", text="Symbol Name")
+        tree.heading("Type", text="Type")
+        tree.heading("Description", text="Description")
+        tree.column("Name", width=150)
+        tree.column("Type", width=100)
+        tree.column("Description", width=300)
+        tree.pack(fill="both", expand=True)
+        
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        tree.config(yscroll=scrollbar.set)
+        
+        # Populate tree with current symbols
+        for sym_name, sym_data in self.symbols.items():
+            sym_type = sym_data.get('type', 'local')
+            description = sym_data.get('description', '')
+            tree.insert("", "end", values=(sym_name, sym_type, description))
+        
+        # Create frame for buttons
+        button_frame = ttk.Frame(sym_window)
+        button_frame.pack(fill="x", padx=5, pady=5, side="bottom")
+        
+        def add_symbol():
+            """Add a new symbol."""
+            add_window = tk.Toplevel(sym_window)
+            add_window.title("Add Symbol")
+            add_window.geometry("400x200")
+            
+            # Symbol name
+            ttk.Label(add_window, text="Symbol Name:").pack(anchor="w", padx=10, pady=5)
+            name_entry = ttk.Entry(add_window, width=40)
+            name_entry.pack(padx=10, pady=5)
+            
+            # Type selector
+            ttk.Label(add_window, text="Type:").pack(anchor="w", padx=10, pady=5)
+            type_var = tk.StringVar(value="local")
+            type_frame = ttk.Frame(add_window)
+            type_frame.pack(padx=10, pady=5)
+            for ttype in ["input", "output", "local"]:
+                ttk.Radiobutton(type_frame, text=ttype.capitalize(), variable=type_var, value=ttype).pack(anchor="w")
+            
+            # Description
+            ttk.Label(add_window, text="Description:").pack(anchor="w", padx=10, pady=5)
+            desc_entry = ttk.Entry(add_window, width=40)
+            desc_entry.pack(padx=10, pady=5)
+            
+            def save_symbol():
+                """Save the new symbol."""
+                name = name_entry.get().strip()
+                if name:
+                    self.symbols[name] = {
+                        'type': type_var.get(),
+                        'description': desc_entry.get()
+                    }
+                    tree.insert("", "end", values=(name, type_var.get(), desc_entry.get()))
+                    add_window.destroy()
+            
+            ttk.Button(add_window, text="Save", command=save_symbol).pack(side="left", padx=5, pady=10)
+            ttk.Button(add_window, text="Cancel", command=add_window.destroy).pack(side="left", padx=5, pady=10)
+        
+        def remove_symbol():
+            """Remove selected symbol."""
+            selection = tree.selection()
+            if selection:
+                item = selection[0]
+                sym_name = tree.item(item)['values'][0]
+                if sym_name in self.symbols:
+                    del self.symbols[sym_name]
+                tree.delete(item)
+        
+        def edit_symbol():
+            """Edit selected symbol."""
+            selection = tree.selection()
+            if selection:
+                item = selection[0]
+                values = tree.item(item)['values']
+                sym_name = values[0]
+                
+                edit_window = tk.Toplevel(sym_window)
+                edit_window.title(f"Edit Symbol: {sym_name}")
+                edit_window.geometry("400x200")
+                
+                # Type selector
+                ttk.Label(edit_window, text="Type:").pack(anchor="w", padx=10, pady=5)
+                type_var = tk.StringVar(value=values[1])
+                type_frame = ttk.Frame(edit_window)
+                type_frame.pack(padx=10, pady=5)
+                for ttype in ["input", "output", "local"]:
+                    ttk.Radiobutton(type_frame, text=ttype.capitalize(), variable=type_var, value=ttype).pack(anchor="w")
+                
+                # Description
+                ttk.Label(edit_window, text="Description:").pack(anchor="w", padx=10, pady=5)
+                desc_entry = ttk.Entry(edit_window, width=40)
+                desc_entry.insert(0, values[2])
+                desc_entry.pack(padx=10, pady=5)
+                
+                def save_changes():
+                    """Save changes to symbol."""
+                    self.symbols[sym_name] = {
+                        'type': type_var.get(),
+                        'description': desc_entry.get()
+                    }
+                    tree.item(item, values=(sym_name, type_var.get(), desc_entry.get()))
+                    edit_window.destroy()
+                
+                ttk.Button(edit_window, text="Save", command=save_changes).pack(side="left", padx=5, pady=10)
+                ttk.Button(edit_window, text="Cancel", command=edit_window.destroy).pack(side="left", padx=5, pady=10)
+        
+        # Add buttons
+        ttk.Button(button_frame, text="Add Symbol", command=add_symbol).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Edit Symbol", command=edit_symbol).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Remove Symbol", command=remove_symbol).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Close", command=sym_window.destroy).pack(side="right", padx=5)
 
     def set_language(self, language):
         """Set the code generation language."""
@@ -895,8 +1119,10 @@ class GraphicalMaster(tk.Tk):
         self.language_var.set(language)
         
     def show_generated_code(self):
+        self._analyze_logical_connections()
+        self.symbols = self.get_symbols()
         """Open a window showing the generated code."""
-        show_code_editor(self, self.nodes, self.edges, self.default_state, self.language)
+        show_code_editor(self, self.nodes, self.edges, self.default_state, self.language, self.logical_connections, self.symbols)
 
     def save_layout(self):
         file = fd.asksaveasfilename(defaultextension=".lyt", filetypes=[("Layout files", "*.lyt")])
