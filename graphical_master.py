@@ -286,7 +286,7 @@ class GraphicalMaster(tk.Tk):
         else:
             self._start = (x, y)
             if self.mode == "state":
-                self._temp = self.canvas.create_rectangle(x, y, x, y, outline="black", tags=("shape","node","temp"))
+                self._temp = self.canvas.create_rectangle(x, y, x+350, y+150, outline="black", tags=("shape","node","temp"))
             elif self.mode == "junction":
                 self._temp = self.canvas.create_oval(x, y, x, y, outline="black", tags=("shape","node","temp"))
 
@@ -310,17 +310,18 @@ class GraphicalMaster(tk.Tk):
                 else:
                     new_x0, new_y0 = bbox[0] + dx, bbox[1]
                     new_x1, new_y1 = bbox[2], bbox[3]
-                min_size = 30 if self.nodes[self.selected]['type'] == 'state' else 20
-                if new_x1 - new_x0 < min_size:
+                min_size_x = 100 if self.nodes[self.selected]['type'] == 'state' else 20
+                min_size_y = 30 if self.nodes[self.selected]['type'] == 'state' else 20
+                if new_x1 - new_x0 < min_size_x:
                     if self._resize_handle in ('br', 'tr'):
-                        new_x1 = new_x0 + min_size
+                        new_x1 = new_x0 + min_size_x
                     else:
-                        new_x0 = new_x1 - min_size
-                if new_y1 - new_y0 < min_size:
+                        new_x0 = new_x1 - min_size_x
+                if new_y1 - new_y0 < min_size_y:
                     if self._resize_handle in ('br', 'bl'):
-                        new_y1 = new_y0 + min_size
+                        new_y1 = new_y0 + min_size_y
                     else:
-                        new_y0 = new_y1 - min_size
+                        new_y0 = new_y1 - min_size_y
                 self.canvas.coords(self.selected, new_x0, new_y0, new_x1, new_y1)
                 new_bbox = self.canvas.bbox(self.selected)
                 original_center_x = (bbox[0] + bbox[2]) / 2
@@ -390,8 +391,8 @@ class GraphicalMaster(tk.Tk):
                 w = bbox[2] - bbox[0]
                 h = bbox[3] - bbox[1]
                 if self.mode == 'state':
-                    w = max(w, 30)
-                    h = max(h, 30)
+                    w = max(w, 350)
+                    h = max(h, 150)
                 elif self.mode == 'junction':
                     w = max(w, 20)
                     h = max(h, 20)
@@ -403,7 +404,7 @@ class GraphicalMaster(tk.Tk):
                     'size': (w, h),
                     'type': 'state' if self.mode == 'state' else 'junction',
                     'name': f"State {self._temp}" if self.mode == 'state' else '',
-                    'code': "// code executed once on entry of the state\nentry:\n\n// cyclic execution as long as state is active\nduring:\n\n// code executed when exiting the state\nexit:" if self.mode == 'state' else '',
+                    'code': "entry:\n// code executed once on entry of the state\nduring:\n// cyclic execution as long as state is active\nexit:\n// code executed when exiting the state\n" if self.mode == 'state' else '',
                     'incoming': [],
                     'outgoing': [],
                     'incoming_points': {},
