@@ -787,24 +787,107 @@ class GraphicalMaster(tk.Tk):
     def show_connections(self):
         win = tk.Toplevel(self)
         win.title("Connections")
-        tree = ttk.Treeview(win, columns=("From", "To", "Edge ID"), show="headings")
+        tree = ttk.Treeview(win, columns=("From", "To", "Condition"), show="headings")
         tree.heading("From", text="From")
         tree.heading("To", text="To")
-        tree.heading("Edge ID", text="Edge ID")
+        tree.heading("Condition", text="Condition")
         tree.pack(fill="both", expand=True)
+        
+        # Build a map of edges by their start and end nodes
+        edge_map = {}
         for edge_id in self.canvas.find_withtag("edge"):
             tags = self.canvas.gettags(edge_id)
             start_id = None
             end_id = None
             for tag in tags:
                 if tag.startswith("start:"):
-                    start_id = tag.split(":")[1]
+                    start_id = int(tag.split(":")[1])
                 elif tag.startswith("end:"):
-                    end_id = tag.split(":")[1]
-            if start_id and end_id:
-                from_name = self.nodes[int(start_id)]['name'] if self.nodes[int(start_id)]['type'] == 'state' else 'Junction'
-                to_name = self.nodes[int(end_id)]['name'] if self.nodes[int(end_id)]['type'] == 'state' else 'Junction'
-                tree.insert("", "end", values=(from_name, to_name, edge_id))
+                    end_id = int(tag.split(":")[1])
+            if start_id is not None and end_id is not None:
+                if (start_id, end_id) not in edge_map:
+                    edge_map[(start_id, end_id)] = []
+                edge_map[(start_id, end_id)].append(edge_id)
+        
+        # Helper function to enumerate all paths through junctions
+        def find_all_paths(current_node, visited_nodes=None, path_edges=None):
+            """
+            Recursively find all paths from current node to final states.
+            Returns: list of (final_state_id, list_of_edge_ids_in_path)
+            """
+            if visited_nodes is None:
+                visited_nodes = set()
+            if path_edges is None:
+                path_edges = []
+            
+            # Prevent infinite loops
+            if current_node in visited_nodes:
+                return []
+            
+            visited_nodes.add(current_node)
+            
+            # If current node is a state, return this complete path
+            if self.nodes[current_node]['type'] == 'state':
+                return [(current_node, path_edges)]
+            
+            # If current node is a junction, find all outgoing edges
+            all_paths = []
+            for (start, end), edge_ids in edge_map.items():
+                if start == current_node:
+                    # For each outgoing edge from this junction, continue tracing
+                    for edge_id in edge_ids:
+                        new_path_edges = path_edges + [edge_id]
+                        paths = find_all_paths(end, visited_nodes.copy(), new_path_edges)
+                        all_paths.extend(paths)
+            
+            return all_paths
+        
+        # Process all edges and build state-to-state connections
+        processed_edge_ids = set()
+        connections = {}  # (start_state, end_state) -> list of edge_id lists
+        
+        # For each edge in the graph
+        for (start_id, end_id), edge_ids in edge_map.items():
+            # If starting from a state
+            if self.nodes[start_id]['type'] == 'state':
+                # Trace all paths from the end node
+                if self.nodes[end_id]['type'] == 'junction':
+                    # Junction path
+                    paths = find_all_paths(end_id)
+                    for final_state, path_edges in paths:
+                        # Combine this edge with path edges
+                        all_path_edges = edge_ids + path_edges
+                        key = (start_id, final_state)
+                        if key not in connections:
+                            connections[key] = []
+                        connections[key].append(all_path_edges)
+                else:
+                    # Direct state-to-state
+                    key = (start_id, end_id)
+                    if key not in connections:
+                        connections[key] = []
+                    connections[key].append(edge_ids)
+        
+        # Display all unique connections
+        for (start_id, end_id), all_edge_lists in connections.items():
+            # For each unique path, display it with combined conditions
+            for edge_list in all_edge_lists:
+                conditions = []
+                for edge_id in edge_list:
+                    if edge_id in self.edges and 'condition' in self.edges[edge_id]:
+                        cond = self.edges[edge_id]['condition']
+                        if cond and not cond.startswith(("//", "#", "%")):
+                            conditions.append(cond)
+                
+                # Combine all conditions with AND
+                if conditions:
+                    combined_condition = " AND ".join(f"({cond})" if " " in cond else cond for cond in conditions)
+                else:
+                    combined_condition = "//[condition]"
+                
+                from_name = self.nodes[start_id]['name']
+                to_name = self.nodes[end_id]['name']
+                tree.insert("", "end", values=(from_name, to_name, combined_condition))
 
     def set_language(self, language):
         """Set the code generation language."""
