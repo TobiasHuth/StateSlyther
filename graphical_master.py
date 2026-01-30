@@ -913,8 +913,9 @@ class GraphicalMaster(tk.Tk):
                 tree.insert("", "end", values=(from_name, to_name, condition))
 
     def get_symbols(self):
-        """Extract symbols from all code sections of states and transitional logic."""
-        symbols = {}
+        """Extract symbols from all code sections of states and transitional logic.
+        Only adds symbols that are not already known, preserving existing metadata."""
+        extracted = {}
         
         # Extract symbols from state code (entry, during, exit sections)
         for node_id, node_data in self.nodes.items():
@@ -922,16 +923,22 @@ class GraphicalMaster(tk.Tk):
                 code = node_data.get('code', '')
                 if code:
                     # Extract variable names from code
-                    self._extract_symbols_from_text(code, symbols)
+                    self._extract_symbols_from_text(code, extracted)
         
         # Extract symbols from transition conditions
         for (start_id, end_id), connections in self.logical_connections.items():
             for conn in connections:
                 condition = conn.get('condition', '')
                 if condition:
-                    self._extract_symbols_from_text(condition, symbols)
+                    self._extract_symbols_from_text(condition, extracted)
         
-        return symbols
+        # Merge extracted symbols with existing ones, keeping existing metadata
+        for sym_name, sym_data in extracted.items():
+            if sym_name not in self.symbols:
+                # Only add if not already known
+                self.symbols[sym_name] = sym_data
+        
+        return self.symbols
     
     def _extract_symbols_from_text(self, text, symbols_dict):
         """Helper method to extract variable names from text."""
@@ -1021,29 +1028,43 @@ class GraphicalMaster(tk.Tk):
         button_frame = ttk.Frame(sym_window)
         button_frame.pack(fill="x", padx=5, pady=5, side="bottom")
         
-        def add_symbol():
-            """Add a new symbol."""
-            add_window = tk.Toplevel(sym_window)
-            add_window.title("Add Symbol")
-            add_window.geometry("400x200")
+        def create_symbol_dialog(title, initial_name=None, initial_type="local", initial_desc=""):
+            """Create a dialog window for adding/editing a symbol.
+            Returns: window, name_entry (or None if edit), type_var, desc_entry"""
+            dialog_window = tk.Toplevel(sym_window)
+            dialog_window.title(title)
+            dialog_window.geometry("400x300")
             
             # Symbol name
-            ttk.Label(add_window, text="Symbol Name:").pack(anchor="w", padx=10, pady=5)
-            name_entry = ttk.Entry(add_window, width=40)
-            name_entry.pack(padx=10, pady=5)
+            ttk.Label(dialog_window, text="Symbol Name:").pack(anchor="w", padx=10, pady=5)
+            if initial_name:
+                # Edit mode: display name as read-only
+                ttk.Label(dialog_window, text=initial_name, relief="sunken").pack(anchor="w", padx=10, pady=5, fill="x")
+                name_entry = None
+            else:
+                # Add mode: editable name field
+                name_entry = ttk.Entry(dialog_window, width=40)
+                name_entry.pack(padx=10, pady=5)
             
             # Type selector
-            ttk.Label(add_window, text="Type:").pack(anchor="w", padx=10, pady=5)
-            type_var = tk.StringVar(value="local")
-            type_frame = ttk.Frame(add_window)
+            ttk.Label(dialog_window, text="Type:").pack(anchor="w", padx=10, pady=5)
+            type_var = tk.StringVar(value=initial_type)
+            type_frame = ttk.Frame(dialog_window)
             type_frame.pack(padx=10, pady=5)
             for ttype in ["input", "output", "local"]:
-                ttk.Radiobutton(type_frame, text=ttype.capitalize(), variable=type_var, value=ttype).pack(anchor="w")
+                ttk.Radiobutton(type_frame, text=ttype.capitalize(), variable=type_var, value=ttype).pack(side="left", padx=5)
             
             # Description
-            ttk.Label(add_window, text="Description:").pack(anchor="w", padx=10, pady=5)
-            desc_entry = ttk.Entry(add_window, width=40)
+            ttk.Label(dialog_window, text="Description:").pack(anchor="w", padx=10, pady=5)
+            desc_entry = ttk.Entry(dialog_window, width=40)
+            desc_entry.insert(0, initial_desc)
             desc_entry.pack(padx=10, pady=5)
+            
+            return dialog_window, name_entry, type_var, desc_entry
+        
+        def add_symbol():
+            """Add a new symbol."""
+            add_window, name_entry, type_var, desc_entry = create_symbol_dialog("Add Symbol")
             
             def save_symbol():
                 """Save the new symbol."""
@@ -1077,23 +1098,12 @@ class GraphicalMaster(tk.Tk):
                 values = tree.item(item)['values']
                 sym_name = values[0]
                 
-                edit_window = tk.Toplevel(sym_window)
-                edit_window.title(f"Edit Symbol: {sym_name}")
-                edit_window.geometry("400x200")
-                
-                # Type selector
-                ttk.Label(edit_window, text="Type:").pack(anchor="w", padx=10, pady=5)
-                type_var = tk.StringVar(value=values[1])
-                type_frame = ttk.Frame(edit_window)
-                type_frame.pack(padx=10, pady=5)
-                for ttype in ["input", "output", "local"]:
-                    ttk.Radiobutton(type_frame, text=ttype.capitalize(), variable=type_var, value=ttype).pack(anchor="w")
-                
-                # Description
-                ttk.Label(edit_window, text="Description:").pack(anchor="w", padx=10, pady=5)
-                desc_entry = ttk.Entry(edit_window, width=40)
-                desc_entry.insert(0, values[2])
-                desc_entry.pack(padx=10, pady=5)
+                edit_window, _, type_var, desc_entry = create_symbol_dialog(
+                    f"Edit Symbol: {sym_name}",
+                    initial_name=sym_name,
+                    initial_type=values[1],
+                    initial_desc=values[2]
+                )
                 
                 def save_changes():
                     """Save changes to symbol."""
@@ -1133,6 +1143,15 @@ class GraphicalMaster(tk.Tk):
             # Save default state id
             if self.default_state is not None:
                 ET.SubElement(root, "default_state", id=str(self.default_state))
+            
+            # Save symbols
+            if self.symbols:
+                symbols_elem = ET.SubElement(root, "symbols")
+                for sym_name, sym_data in self.symbols.items():
+                    sym_elem = ET.SubElement(symbols_elem, "symbol", name=sym_name, type=sym_data.get('type', 'local'))
+                    desc_elem = ET.SubElement(sym_elem, "description")
+                    desc_elem.text = sym_data.get('description', '')
+            
             for item_id, data in self.nodes.items():
                 node_elem = ET.SubElement(root, "node", id=str(item_id), x=str(data['position'][0]), y=str(data['position'][1]), w=str(data['size'][0]), h=str(data['size'][1]), type=data['type'], name=str(data['name']))
                 # Save code for states
@@ -1156,8 +1175,27 @@ class GraphicalMaster(tk.Tk):
                     if edge_id in self.edges and 'condition' in self.edges[edge_id]:
                         condition_elem = ET.SubElement(edge_elem, "condition")
                         condition_elem.text = self.edges[edge_id]['condition']
+            
+            # Pretty-print and save XML with indentation
+            self._indent_xml(root)
             tree = ET.ElementTree(root)
-            tree.write(file)
+            tree.write(file, encoding='utf-8', xml_declaration=True)
+
+    def _indent_xml(self, elem, level=0):
+        """Add pretty-printing indentation and line breaks to XML element tree."""
+        indent = "\n" + level * "  "
+        if len(elem):
+            if not elem.text or not elem.text.strip():
+                elem.text = indent + "  "
+            if not elem.tail or not elem.tail.strip():
+                elem.tail = indent
+            for child in elem:
+                self._indent_xml(child, level + 1)
+            if not child.tail or not child.tail.strip():
+                child.tail = indent
+        else:
+            if level and (not elem.tail or not elem.tail.strip()):
+                elem.tail = indent
 
     def open_layout(self):
         file = fd.askopenfilename(filetypes=[("Layout files", "*.lyt")])
@@ -1174,6 +1212,20 @@ class GraphicalMaster(tk.Tk):
             if language_elem is not None:
                 self.language = language_elem.get("value", "python")
                 self.language_var.set(self.language)
+            
+            # Restore symbols
+            self.symbols.clear()
+            symbols_elem = root.find("symbols")
+            if symbols_elem is not None:
+                for sym_elem in symbols_elem.findall("symbol"):
+                    sym_name = sym_elem.get("name")
+                    sym_type = sym_elem.get("type", "local")
+                    desc_elem = sym_elem.find("description")
+                    sym_desc = desc_elem.text if desc_elem is not None and desc_elem.text else ""
+                    self.symbols[sym_name] = {
+                        'type': sym_type,
+                        'description': sym_desc
+                    }
             
             # Restore default state id
             default_elem = root.find("default_state")

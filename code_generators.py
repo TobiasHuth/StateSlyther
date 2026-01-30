@@ -76,6 +76,25 @@ class CodeGenerator:
             return f"STATE_{node_id}"
         return self.nodes[node_id]['name'].upper().replace(" ", "_") or f"STATE_{node_id}"
     
+    def _prefix_variables_with_self(self, code_text):
+        """Prefix symbol variables with 'self.' in generated code."""
+        if not code_text or not self.symbols:
+            return code_text
+        
+        # Get all symbol names
+        symbol_names = list(self.symbols.keys())
+        
+        # Replace symbol names with self.symbol_name
+        # Use word boundaries to avoid partial replacements
+        import re
+        for sym_name in symbol_names:
+            # Match symbol name as a whole word (not part of another word)
+            pattern = r'\b' + re.escape(sym_name) + r'\b'
+            replacement = f'self.{sym_name}'
+            code_text = re.sub(pattern, replacement, code_text)
+        
+        return code_text
+    
     def _convert_comments_to_language(self, code_text):
         """
         Convert comments in code to the appropriate syntax for the target language.
@@ -149,7 +168,7 @@ class CodeGenerator:
         class_name = f"{self.language.capitalize()}StateMachine"
         code.append(f"class {class_name}:")
         code.append("    def __init__(self):")
-        code.append("        \"\"\"Initialize the state machine with three state variables\"\"\"")
+        code.append("        \"\"\"Initialize the state machine with state variables and symbols\"\"\"")
         
         # Set initial states
         if self.default_state and self.default_state in self.nodes:
@@ -162,6 +181,27 @@ class CodeGenerator:
             code.append("        self.current_state = None")
             code.append("        self.next_state = None")
         code.append("")
+        
+        # Initialize input, local, and output variables as class members
+        if self.symbols:
+            code.append("        # Initialize input variables")
+            input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
+            for sym_name in input_symbols:
+                code.append(f"        self.{sym_name} = False")
+            
+            code.append("")
+            code.append("        # Initialize local variables")
+            local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
+            for sym_name in local_symbols:
+                code.append(f"        self.{sym_name} = 0")
+            
+            code.append("")
+            code.append("        # Initialize output variables")
+            output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
+            for sym_name in output_symbols:
+                code.append(f"        self.{sym_name} = 0")
+            
+            code.append("")
         
         # Generate update method
         code.append("    def update(self):")
@@ -179,6 +219,10 @@ class CodeGenerator:
                 
                 sections = self._parse_code_sections(node_data.get('code', ''), indent_level=0)
                 
+                # Prefix variables with self.
+                for key in sections:
+                    sections[key] = self._prefix_variables_with_self(sections[key])
+                
                 # Convert comments to target language
                 for key in sections:
                     sections[key] = self._convert_comments_to_language(sections[key])
@@ -194,14 +238,14 @@ class CodeGenerator:
                     code.append("                pass")
                 code.append("")
                 
-                # During code
+                # During code - executed unconditionally every cycle
                 code.append(f"            # During: executed every cycle")
                 if sections['during'].strip():
                     for line in sections['during'].split('\n'):
                         if line.strip():
-                            code.append(f"                {line}")
+                            code.append(f"            {line}")
                 else:
-                    code.append("                pass")
+                    code.append("            pass")
                 code.append("")
                 
                 # Transitions from this state
@@ -212,6 +256,8 @@ class CodeGenerator:
                         for conn in connections:
                             condition = conn.get('condition', '')
                             if condition and not condition.startswith(('//','#')):
+                                # Prefix variables in condition
+                                condition = self._prefix_variables_with_self(condition)
                                 end_state_name = state_ids.get(end_id)
                                 transitions_list.append((condition, end_state_name))
                 
@@ -543,7 +589,7 @@ def show_state_machine_tester(parent, nodes, edges, default_state, language, log
         """Update the state machine display"""
         state_label.config(text=f"Current State: {sm.current_state.value if sm.current_state else 'None'}")
         
-        # Display variables from namespace
+        # Display variables from the state machine object
         output_text.config(state="normal")
         output_text.delete("1.0", "end")
         
@@ -553,33 +599,33 @@ def show_state_machine_tester(parent, nodes, edges, default_state, language, log
         output_text.insert("end", f"next_state: {sm.next_state.value if sm.next_state else 'None'}\n")
         output_text.insert("end", "\nUser-defined variables:\n")
         
-        # Display input/output symbols
+        # Display input/output symbols from the state machine object
         if symbols:
             output_symbols = {k: v for k, v in symbols.items() if v.get('type') in ('output', 'local')}
             if output_symbols:
                 for sym_name in output_symbols:
-                    val = namespace.get(sym_name, 'undefined')
+                    val = getattr(sm, sym_name, 'undefined')
                     output_text.insert("end", f"{sym_name}: {val}\n")
         
         output_text.config(state="disabled")
     
     def step():
         """Execute one state machine cycle"""
-        # Update input variables in namespace
+        # Update input variables on the state machine object
         for sym_name, entry in input_vars.items():
             try:
                 val = entry.get()
                 # Try to parse as boolean, int, or float
                 if val.lower() in ('true', 'false'):
-                    namespace[sym_name] = val.lower() == 'true'
+                    setattr(sm, sym_name, val.lower() == 'true')
                 else:
                     try:
-                        namespace[sym_name] = int(val)
+                        setattr(sm, sym_name, int(val))
                     except ValueError:
                         try:
-                            namespace[sym_name] = float(val)
+                            setattr(sm, sym_name, float(val))
                         except ValueError:
-                            namespace[sym_name] = val
+                            setattr(sm, sym_name, val)
             except Exception as e:
                 pass
         
