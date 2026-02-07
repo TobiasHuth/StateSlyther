@@ -13,7 +13,7 @@ graph LR
   D --> E
 ```
 
-Version 1.0.0:
+## Version 1.0.0:
 There are (as of now) two modules to the package: graphical input and code generators. Right now, the code gen is tailored for the systematic of the graphical input and the data structure behind it. 
 
 Starting the graphical_master should bring up this window:
@@ -44,9 +44,9 @@ And that covers about it. Statemachines can be designed using these items.
 In order to have the statemachine communicate as intended, the symbols/ variables have to be declared. Under _Chart_ select _edit symbols_
 ![dialogue for editing the symbols](pictures_docu/06_edit_symbols_of_chart.png)
 
-This is pretty self explanatory. Right now only python is supported, so no data type is declared. 
+This is pretty self explanatory. Right now the computer guesses the data types!
 
-After designing the chart in the way shown, python code can be generated and tested.
+After designing the chart in the way shown, code can be generated and tested.
 
 Select _Code_ --> Update/Show Code
 The Buttons of the tester do as expected.
