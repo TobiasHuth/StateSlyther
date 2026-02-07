@@ -64,7 +64,8 @@ class GraphicalMaster(tk.Tk):
         toolbar.pack(side="top", fill="x")
 
         for m in ("state", "junction", "line"):
-            btn = ttk.Button(toolbar, text=m.capitalize(), command=lambda mm=m: self.set_mode(mm))
+            label = "Transition" if m == "line" else m.capitalize()
+            btn = ttk.Button(toolbar, text=label, command=lambda mm=m: self.set_mode(mm))
             btn.pack(side="left", padx=4, pady=4)
 
         self.default_btn = ttk.Button(toolbar, text="Set as Default", command=self.set_default_state, state="disabled")
@@ -1129,9 +1130,9 @@ class GraphicalMaster(tk.Tk):
         self.language_var.set(language)
         
     def show_generated_code(self):
+        """Open a window showing the generated code."""
         self._analyze_logical_connections()
         self.symbols = self.get_symbols()
-        """Open a window showing the generated code."""
         show_code_editor(self, self.nodes, self.edges, self.default_state, self.language, self.logical_connections, self.symbols)
 
     def save_layout(self):
