@@ -1,5 +1,7 @@
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, messagebox
+import sys
+from pathlib import Path
 
 
 class CodeGenerator:
@@ -136,6 +138,152 @@ class CodeGenerator:
         
         return '\n'.join(converted_lines)
     
+    def _convert_operators_to_language(self, code_text):
+        """
+        Convert logical operators between Python and C syntax.
+        
+        Python -> C:
+        - 'and' -> '&&'
+        - 'or' -> '||'
+        - 'not ' -> '!'
+        
+        C -> Python:
+        - '&&' -> 'and'
+        - '||' -> 'or'
+        - '!' -> 'not '
+        """
+        if not code_text:
+            return code_text
+        
+        import re
+        
+        if self.language.lower() == "c":
+            # Convert Python operators to C operators
+            # Use word boundaries to avoid partial matches
+            code_text = re.sub(r'\band\b', '&&', code_text)
+            code_text = re.sub(r'\bor\b', '||', code_text)
+            code_text = re.sub(r'\bnot\s+', '!', code_text)
+        elif self.language.lower() == "python":
+            # Convert C operators to Python operators
+            code_text = code_text.replace('&&', 'and')
+            code_text = code_text.replace('||', 'or')
+            # Be careful with '!' conversion due to negation contexts
+            code_text = re.sub(r'!\s*\(', 'not (', code_text)
+            code_text = re.sub(r'!\s*([a-zA-Z_])', r'not \1', code_text)
+        
+        return code_text
+    
+    def _add_c_semicolons(self, code_text):
+        """
+        Add missing semicolons to C code lines that need them.
+        This converts Python-style code (no semicolons) to C-style code with semicolons.
+        """
+        if not code_text or self.language.lower() != "c":
+            return code_text
+        
+        lines = code_text.split('\n')
+        fixed_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Skip empty lines, comment lines, and lines that don't need semicolons
+            if not stripped or stripped.startswith('//') or stripped.startswith('#'):
+                fixed_lines.append(line)
+                continue
+            
+            # Skip control structures and braces
+            if stripped in ('{', '}') or stripped.endswith('{') or stripped.startswith('case ') or stripped.startswith('default:'):
+                fixed_lines.append(line)
+                continue
+            
+            # Skip lines that already have semicolon or colon
+            if stripped.endswith(';') or stripped.endswith(':'):
+                fixed_lines.append(line)
+                continue
+            
+            # Skip lines that end with opening brace or condition continuation
+            if stripped.endswith('(') or stripped.endswith(','):
+                fixed_lines.append(line)
+                continue
+            
+            # Handle return statements (with or without values)
+            if stripped.startswith('return'):
+                if not stripped.endswith(';'):
+                    line = line.rstrip() + ';'
+                fixed_lines.append(line)
+                continue
+            
+            # Handle break and continue statements
+            if stripped in ('break', 'continue'):
+                if not stripped.endswith(';'):
+                    line = line.rstrip() + ';'
+                fixed_lines.append(line)
+                continue
+            
+            # Check if this is an assignment statement (has = but not ==, !=, <=, >=)
+            # Assignment statements need semicolons even if they end with )
+            is_assignment = ('=' in stripped and 
+                           not any(op in stripped for op in ['==', '!=', '<=', '>=']) and
+                           not any(kw in stripped for kw in ['if', 'else', 'for', 'while', 'switch']))
+            
+            if is_assignment:
+                # This is definitely an assignment that needs a semicolon
+                if not stripped.endswith(';'):
+                    line = line.rstrip() + ';'
+                fixed_lines.append(line)
+                continue
+            
+            # Add semicolon to other statements that need them
+            needs_semicolon = any(op in stripped for op in ['=', '++', '--', '(', '[', 'return', 'break', 'continue'])
+            
+            if needs_semicolon and not stripped.endswith(('{', '}', ':', '(')):
+                # This looks like a statement that needs a semicolon (but may end with ))
+                if not stripped.endswith(';'):
+                    line = line.rstrip() + ';'
+            elif not any(kw in stripped for kw in ['if', 'else', 'for', 'while', 'switch', 'do', 'case', 'default', 'break', 'continue']):
+                # Other statements that likely need semicolons (variable accesses, function calls, etc.)
+                if not stripped.startswith(('if', 'else', 'for', 'while', 'switch', '{', '}')) and not stripped.endswith(('{', '}')):
+                    if not stripped.endswith(';') and stripped and (stripped[0].isalnum() or stripped[0] in ('_', 'sm', '*')):
+                        # Likely needs a semicolon
+                        line = line.rstrip() + ';'
+            
+            fixed_lines.append(line)
+        
+        return '\n'.join(fixed_lines)
+    
+    def _has_executable_code(self, code_text):
+        """Check if a code section contains actual executable code (not just comments)."""
+        if not code_text or not code_text.strip():
+            return False
+        
+        lines = code_text.split('\n')
+        for line in lines:
+            stripped = line.strip()
+            # Skip empty lines and comment-only lines
+            if not stripped or stripped.startswith('#') or stripped.startswith('//'):
+                continue
+            # Found non-comment, non-empty line
+            return True
+        
+        return False
+    
+    def _is_intentionally_empty(self, code_text):
+        """Check if code section is marked as intentionally empty (e.g., '// nix' or '# nix')."""
+        if not code_text or not code_text.strip():
+            return False
+        
+        lines = code_text.split('\n')
+        for line in lines:
+            stripped = line.strip()
+            # Look for "nix" in comment lines
+            if stripped.startswith('//') and 'nix' in stripped.lower():
+                return True
+            if stripped.startswith('#') and 'nix' in stripped.lower():
+                return True
+        
+        return False
+    
     def generate_code(self):
         """Generate code based on selected language."""
         if self.language.lower() == "python":
@@ -230,7 +378,7 @@ class CodeGenerator:
                 # Entry code - triggered when previous != current
                 code.append(f"            # Entry: triggered when entering this state")
                 code.append(f"            if self.previous_state != self.current_state:")
-                if sections['entry'].strip():
+                if self._has_executable_code(sections['entry']):
                     for line in sections['entry'].split('\n'):
                         if line.strip():
                             code.append(f"                {line}")
@@ -240,7 +388,7 @@ class CodeGenerator:
                 
                 # During code - executed unconditionally every cycle
                 code.append(f"            # During: executed every cycle")
-                if sections['during'].strip():
+                if self._has_executable_code(sections['during']):
                     for line in sections['during'].split('\n'):
                         if line.strip():
                             code.append(f"            {line}")
@@ -280,7 +428,7 @@ class CodeGenerator:
                 # Exit code - triggered when transitioning out (current != next)
                 code.append(f"            # Exit: triggered when leaving this state")
                 code.append(f"            if self.current_state != self.next_state:")
-                if sections['exit'].strip():
+                if self._has_executable_code(sections['exit']):
                     for line in sections['exit'].split('\n'):
                         if line.strip():
                             code.append(f"                {line}")
@@ -331,7 +479,33 @@ class CodeGenerator:
         code.append(f"typedef struct {{")
         code.append("    State current_state;")
         code.append("    State previous_state;")
+        code.append("    State next_state;")
+        
+        # Add symbols to struct
+        if self.symbols:
+            code.append("    // Input variables")
+            input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
+            for sym_name in input_symbols:
+                code.append(f"    bool {sym_name};")
+            
+            code.append("    // Local variables")
+            local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
+            for sym_name in local_symbols:
+                code.append(f"    int {sym_name};")
+            
+            code.append("    // Output variables")
+            output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
+            for sym_name in output_symbols:
+                code.append(f"    int {sym_name};")
+        
         code.append(f"}} {struct_name};")
+        code.append("")
+        
+        # Forward declarations for state functions
+        for state_name in state_names:
+            code.append(f"void entry_{state_name}({struct_name}* sm);")
+            code.append(f"void during_{state_name}({struct_name}* sm);")
+            code.append(f"void check_transitions_{state_name}({struct_name}* sm);")
         code.append("")
         
         # Generate entry functions for each state
@@ -341,10 +515,102 @@ class CodeGenerator:
                 state_name = state_ids_map.get(node_id)
                 code.append(f"void entry_{state_name}({struct_name}* sm) {{")
                 sections = self._parse_code_sections(node_data.get('code', ''), indent_level=1)
-                if sections['entry'].strip():
+                # Prefix variables with sm->
+                for key in sections:
+                    sections[key] = self._prefix_variables_with_self(sections[key]).replace('self.', 'sm->')
+                # Convert comments to language
+                for key in sections:
+                    sections[key] = self._convert_comments_to_language(sections[key])
+                # Add C semicolons if needed
+                for key in sections:
+                    sections[key] = self._add_c_semicolons(sections[key])
+                
+                if self._has_executable_code(sections['entry']):
                     code.append(sections['entry'])
+                elif self._is_intentionally_empty(sections['entry']):
+                    # If marked as 'nix', preserve the intent with minimal comment
+                    code.append("    // (no code)")
                 else:
                     code.append("    // Entry code here")
+                code.append("}")
+                code.append("")
+        
+        # Generate during functions for each state
+        code.append("// During functions - executed every cycle")
+        for node_id, node_data in self.nodes.items():
+            if node_data['type'] == 'state':
+                state_name = state_ids_map.get(node_id)
+                code.append(f"void during_{state_name}({struct_name}* sm) {{")
+                sections = self._parse_code_sections(node_data.get('code', ''), indent_level=1)
+                # Prefix variables with sm->
+                for key in sections:
+                    sections[key] = self._prefix_variables_with_self(sections[key]).replace('self.', 'sm->')
+                # Convert comments to language
+                for key in sections:
+                    sections[key] = self._convert_comments_to_language(sections[key])
+                # Add C semicolons if needed
+                for key in sections:
+                    sections[key] = self._add_c_semicolons(sections[key])
+                
+                if self._has_executable_code(sections['during']):
+                    code.append(sections['during'])
+                elif self._is_intentionally_empty(sections['during']):
+                    # If marked as 'nix', preserve the intent with minimal comment
+                    code.append("    // (no code)")
+                else:
+                    code.append("    // During code here")
+                code.append("}")
+                code.append("")
+        
+        # Generate transition check functions for each state
+        code.append("// Transition check functions - evaluate conditions and perform exit code")
+        for node_id, node_data in self.nodes.items():
+            if node_data['type'] == 'state':
+                state_name = state_ids_map.get(node_id)
+                code.append(f"void check_transitions_{state_name}({struct_name}* sm) {{")
+                
+                sections = self._parse_code_sections(node_data.get('code', ''), indent_level=0)
+                # Prefix variables with sm->
+                for key in sections:
+                    sections[key] = self._prefix_variables_with_self(sections[key]).replace('self.', 'sm->')
+                
+                # Check for transitions from this state
+                has_transition = False
+                for (start_id, end_id), connections in self.logical_connections.items():
+                    if start_id == node_id and end_id in state_ids_map:
+                        for conn in connections:
+                            condition = conn.get('condition', '')
+                            if condition and not condition.startswith(('//','/*')):
+                                has_transition = True
+                                end_state_name = state_ids_map.get(end_id)
+                                # Prefix variables in condition and convert to C style
+                                condition = self._prefix_variables_with_self(condition).replace('self.', 'sm->')
+                                # Convert Python operators to C operators
+                                condition = self._convert_operators_to_language(condition)
+                                code.append(f"    if ({condition}) {{")
+                                # Exit code
+                                exit_sections = self._parse_code_sections(node_data.get('code', ''), indent_level=2)
+                                # Prefix and convert exit code
+                                exit_sections['exit'] = self._prefix_variables_with_self(exit_sections['exit']).replace('self.', 'sm->')
+                                exit_sections['exit'] = self._convert_comments_to_language(exit_sections['exit'])
+                                # Add C semicolons if needed (multiple passes to ensure all statements are fixed)
+                                exit_sections['exit'] = self._add_c_semicolons(exit_sections['exit'])
+                                exit_sections['exit'] = self._add_c_semicolons(exit_sections['exit'])  # Extra pass to catch any missed statements
+                                
+                                if self._has_executable_code(exit_sections['exit']):
+                                    code.append(exit_sections['exit'])
+                                elif self._is_intentionally_empty(exit_sections['exit']):
+                                    # If marked as 'nix', preserve the intent with minimal comment
+                                    code.append("        // (no code)")
+                                else:
+                                    code.append("        // Exit code here")
+                                code.append(f"        sm->next_state = {end_state_name};")
+                                code.append("        return;")
+                                code.append("    }")
+                
+                if not has_transition:
+                    code.append("    // No transitions defined")
+                code.append("    sm->next_state = sm->current_state;")
                 code.append("}")
                 code.append("")
         
@@ -354,49 +620,33 @@ class CodeGenerator:
             initial_state = state_ids_map.get(self.default_state, f"STATE_{self.default_state}")
             code.append(f"    sm->current_state = {initial_state};")
             code.append(f"    sm->previous_state = {initial_state};")
+            code.append(f"    sm->next_state = {initial_state};")
+        
+        # Initialize symbols
+        if self.symbols:
+            code.append("    // Initialize input variables")
+            input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
+            for sym_name in input_symbols:
+                code.append(f"    sm->{sym_name} = false;")
+            
+            code.append("    // Initialize local variables")
+            local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
+            for sym_name in local_symbols:
+                code.append(f"    sm->{sym_name} = 0;")
+            
+            code.append("    // Initialize output variables")
+            output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
+            for sym_name in output_symbols:
+                code.append(f"    sm->{sym_name} = 0;")
+        
         code.append("}")
         code.append("")
         
-        # Generate state handlers
-        for node_id, node_data in self.nodes.items():
-            if node_data['type'] == 'state':
-                state_name = state_ids_map.get(node_id)
-                code.append(f"void handle_{state_name}({struct_name}* sm) {{")
-                
-                sections = self._parse_code_sections(node_data.get('code', ''), indent_level=1)
-                
-                # During code
-                if sections['during'].strip():
-                    code.append(sections['during'])
-                else:
-                    code.append("    // During code here")
-                code.append("")
-                
-                # Transitions from this state
-                for (start_id, end_id), connections in self.logical_connections.items():
-                    if start_id == node_id and end_id in state_ids_map:
-                        for conn in connections:
-                            condition = conn.get('condition', '')
-                            if condition and not condition.startswith(('//','/*')):
-                                end_state_name = state_ids_map.get(end_id)
-                                code.append(f"    // Transition condition: {condition}")
-                                code.append(f"    if ({condition}) {{")
-                                # Exit code needs extra indentation (level 2)
-                                exit_sections = self._parse_code_sections(node_data.get('code', ''), indent_level=2)
-                                if exit_sections['exit'].strip():
-                                    code.append(exit_sections['exit'])
-                                else:
-                                    code.append("        // Exit code here")
-                                code.append(f"        sm->current_state = {end_state_name};")
-                                code.append("    }")
-                code.append("}")
-                code.append("")
-        
         # Generate main update function
         code.append(f"void {self.language.lower()}_state_machine_update({struct_name}* sm) {{")
-        code.append("    // Execute entry code if state changed")
+        code.append("    // Entry: execute when state changes")
         code.append("    if (sm->previous_state != sm->current_state) {")
-        code.append("        switch(sm->current_state) {")
+        code.append("        switch (sm->current_state) {")
         
         for state_name in state_names:
             code.append(f"            case {state_name}:")
@@ -404,33 +654,52 @@ class CodeGenerator:
             code.append("                break;")
         
         code.append("        }")
-        code.append("        sm->previous_state = sm->current_state;")
         code.append("    }")
         code.append("")
-        code.append("    // Execute during code and check transitions")
-        code.append("    switch(sm->current_state) {")
+        code.append("    // During: execute unconditionally")
+        code.append("    switch (sm->current_state) {")
         
         for state_name in state_names:
             code.append(f"        case {state_name}:")
-            code.append(f"            handle_{state_name}(sm);")
+            code.append(f"            during_{state_name}(sm);")
             code.append("            break;")
         
         code.append("    }")
+        code.append("")
+        code.append("    // Transitions: check conditions for state changes")
+        code.append("    switch (sm->current_state) {")
+        
+        for state_name in state_names:
+            code.append(f"        case {state_name}:")
+            code.append(f"            check_transitions_{state_name}(sm);")
+            code.append("            break;")
+        
+        code.append("    }")
+        code.append("")
+        code.append("    // Update state at end of cycle")
+        code.append("    sm->previous_state = sm->current_state;")
+        code.append("    sm->current_state = sm->next_state;")
         code.append("}")
         code.append("")
         
-        # Generate main function
+        # Generate main function with example usage
+        code.append("// Example main function - uncomment to use")
+        code.append("/*")
         code.append("int main() {")
         code.append(f"    {struct_name} sm;")
         code.append(f"    {self.language.lower()}_state_machine_init(&sm);")
         code.append("")
-        code.append("    // Main loop")
-        code.append("    while(1) {")
+        code.append("    printf(\"State Machine initialized.\\\\n\");")
+        code.append("")
+        code.append("    // Main loop - update 10 times as example")
+        code.append("    for (int i = 0; i < 10; i++) {")
         code.append(f"        {self.language.lower()}_state_machine_update(&sm);")
+        code.append("        printf(\"Cycle %d: current_state = %d\\\\n\", i, sm.current_state);")
         code.append("    }")
         code.append("")
         code.append("    return 0;")
         code.append("}")
+        code.append("*/")
         code.append("")
         
         return "\n".join(code)
@@ -483,10 +752,24 @@ def show_code_editor(parent, nodes, edges, default_state, language, logical_conn
     
     def open_tester():
         """Open interactive tester"""
-        show_state_machine_tester(parent, nodes, edges, default_state, language, logical_connections, symbols)
+        if language.lower() == "c":
+            open_c_interactive_tester(parent, generated_code, symbols, nodes)
+        else:
+            show_state_machine_tester(parent, nodes, edges, default_state, language, logical_connections, symbols)
+    
+    def test_c_code():
+        """Test C code with interactive tester"""
+        open_c_interactive_tester(parent, generated_code, symbols, nodes)
     
     tk.Button(button_frame, text="Copy to Clipboard", command=copy_code).pack(side="left", padx=2)
-    tk.Button(button_frame, text="Interactive Tester", command=open_tester).pack(side="left", padx=2)
+    
+    # Only show interactive tester button for Python
+    if language.lower() == "python":
+        tk.Button(button_frame, text="Interactive Tester", command=open_tester).pack(side="left", padx=2)
+    else:
+        # For C code, show test button
+        tk.Button(button_frame, text="Test C Code (Compile)", command=test_c_code).pack(side="left", padx=2)
+    
     tk.Button(button_frame, text="Close", command=code_window.destroy).pack(side="left", padx=2)
     
     if on_close_callback:
@@ -510,7 +793,52 @@ def show_state_machine_tester(parent, nodes, edges, default_state, language, log
     tester_window.title("State Machine Tester")
     tester_window.geometry("600x700")
     
-    # Generate the state machine code
+    # Check if language is C - cannot test C code interactively without compiler
+    if language.lower() == "c":
+        # Create info message
+        info_frame = tk.Frame(tester_window)
+        info_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        title_label = tk.Label(info_frame, text="C Code Testing", font=("Arial", 14, "bold"), fg="blue")
+        title_label.pack(pady=10)
+        
+        message = """C code cannot be tested interactively in this application.
+
+To test your generated C code, you have several options:
+
+1. COMPILE LOCALLY (Windows/Linux/Mac):
+   • Install a C compiler (gcc, clang, or MSVC)
+   • Copy the generated .c file to your project
+   • Compile: gcc generated_file.c -o state_machine
+   • Run the compiled executable
+
+2. ONLINE COMPILER (No installation needed):
+   • Visit: https://www.onlinegdb.com/
+   • Copy the generated C code here
+   • Click "Compile" and "Run"
+
+3. OTHER ONLINE TOOLS:
+   • Repl.it - https://repl.it
+   • Godbolt - https://godbolt.org
+   • Compiler Explorer
+
+The generated C code includes:
+   ✓ Proper struct definition
+   ✓ State machine functions
+   ✓ Example main() function (commented out)
+   ✓ All symbol handling
+   ✓ Standard C libraries included"""
+        
+        message_label = tk.Label(info_frame, text=message, justify="left", font=("Courier", 10), wraplength=500)
+        message_label.pack(pady=10)
+        
+        # Button to close
+        close_btn = tk.Button(info_frame, text="Close", command=tester_window.destroy)
+        close_btn.pack(padx=5, pady=10)
+        
+        return
+    
+    # Generate the state machine code (Python only at this point)
     generator = CodeGenerator(nodes, edges, default_state, language, logical_connections, symbols)
     generated_code = generator.generate_code()
     
@@ -669,3 +997,109 @@ def show_state_machine_tester(parent, nodes, edges, default_state, language, log
     
     # Initial display
     update_display()
+
+
+def open_c_interactive_tester(parent, c_code, symbols=None, nodes=None):
+    """
+    Open an interactive C code tester with compilation support.
+    
+    Args:
+        parent: Parent window
+        c_code: Generated C code string
+        symbols: Dictionary of symbols
+        nodes: Dictionary of nodes
+    """
+    try:
+        from c_interactive_tester import CInteractiveTester
+    except ImportError:
+        messagebox.showerror(
+            "Import Error",
+            "Could not import C interactive tester.\n"
+            "Make sure c_interactive_tester.py is in the same directory."
+        )
+        return
+    
+    # Create tester instance
+    tester = CInteractiveTester(c_code, symbols, nodes)
+    
+    # Check for compiler
+    if not tester.compiler:
+        messagebox.showwarning(
+            "No C Compiler Found",
+            "No C compiler detected on your system.\n\n"
+            "To test C code, install one of:\n"
+            "• gcc (MinGW on Windows, apt on Linux, brew on Mac)\n"
+            "• clang\n"
+            "• MSVC (Visual Studio)\n\n"
+            "Or use an online compiler:\n"
+            "• OnlineGDB: https://www.onlinegdb.com/\n"
+            "• Godbolt: https://godbolt.org/\n"
+            "• Repl.it: https://repl.it/"
+        )
+        return
+    
+    # Show status window
+    status_window = tk.Toplevel(parent)
+    status_window.title("C Code Compiler & Tester")
+    status_window.geometry("600x400")
+    
+    status_text = scrolledtext.ScrolledText(status_window, font=("Courier", 10))
+    status_text.pack(fill="both", expand=True, padx=5, pady=5)
+    
+    def log_message(msg):
+        """Log message to status window"""
+        status_text.config(state="normal")
+        status_text.insert("end", msg + "\n")
+        status_text.see("end")
+        status_text.config(state="disabled")
+        status_window.update()
+    
+    def compile_and_test():
+        """Compile and run the C code"""
+        log_message("=" * 60)
+        log_message("C Code Compilation & Testing")
+        log_message("=" * 60)
+        log_message(f"Compiler detected: {tester.compiler}\n")
+        
+        log_message("Step 1: Generating test harness...")
+        try:
+            harness = tester._generate_test_harness()
+            log_message(f"✓ Test harness generated ({len(harness)} bytes)\n")
+        except Exception as e:
+            log_message(f"✗ Error generating harness: {str(e)}\n")
+            return
+        
+        log_message("Step 2: Compiling C code...")
+        success, message = tester.compile()
+        log_message(f"{'✓' if success else '✗'} {message}\n")
+        
+        if not success:
+            log_message("\nCompilation failed. Check the code for:")
+            log_message("• Python syntax in code blocks (convert to C)")
+            log_message("• Invalid variable references")
+            log_message("• Missing semicolons")
+            return
+        
+        log_message("Step 3: Launching interactive tester...\n")
+        log_message("=" * 60)
+        log_message("INTERACTIVE TESTER READY")
+        log_message("=" * 60)
+        log_message("A new window will open for interactive testing.")
+        log_message("Use the controls to:")
+        log_message("  • Set input variable values")
+        log_message("  • Execute state machine steps")
+        log_message("  • Monitor state and variable changes\n")
+        
+        # Launch GUI tester
+        status_window.after(1000, lambda: tester._launch_gui_tester())
+    
+    # Compile and test button
+    ctrl_frame = tk.Frame(status_window)
+    ctrl_frame.pack(fill="x", padx=5, pady=5)
+    
+    tk.Button(ctrl_frame, text="Compile & Test", command=compile_and_test, bg="green", fg="white", width=20).pack(side="left", padx=5)
+    tk.Button(ctrl_frame, text="Close", command=status_window.destroy, width=20).pack(side="left", padx=5)
+    
+    # Start compilation automatically
+    status_window.after(500, compile_and_test)
+
