@@ -284,12 +284,96 @@ class CodeGenerator:
         
         return False
     
+    def _get_python_type_hint(self, data_type):
+        """Map data type to Python type hint."""
+        if not data_type:
+            return "Any"
+        data_type = data_type.lower()
+        if 'int' in data_type or 'uint' in data_type:
+            return "int"
+        elif 'float' in data_type:
+            return "float"
+        elif 'bool' in data_type:
+            return "bool"
+        elif 'string' in data_type or 'str' in data_type:
+            return "str"
+        else:
+            return "Any"
+    
+    def _get_python_default_value(self, data_type):
+        """Get appropriate default value for Python based on data type."""
+        if not data_type:
+            return "None"
+        data_type = data_type.lower()
+        if 'int' in data_type or 'uint' in data_type:
+            return "0"
+        elif 'float' in data_type:
+            return "0.0"
+        elif 'bool' in data_type:
+            return "False"
+        elif 'string' in data_type or 'str' in data_type:
+            return '""'
+        else:
+            return "None"
+    
+    def _get_c_type(self, data_type):
+        """Map data type to C type."""
+        if not data_type:
+            return "int"
+        data_type = data_type.lower()
+        if data_type == 'int8':
+            return "int8_t"
+        elif data_type == 'int16':
+            return "int16_t"
+        elif data_type == 'int32':
+            return "int32_t"
+        elif data_type == 'int64':
+            return "int64_t"
+        elif data_type == 'uint8':
+            return "uint8_t"
+        elif data_type == 'uint16':
+            return "uint16_t"
+        elif data_type == 'uint32':
+            return "uint32_t"
+        elif data_type == 'uint64':
+            return "uint64_t"
+        elif 'float32' in data_type:
+            return "float"
+        elif 'float64' in data_type or 'double' in data_type:
+            return "double"
+        elif 'bool' in data_type:
+            return "bool"
+        elif 'string' in data_type or 'str' in data_type:
+            return "char*"
+        else:
+            return "int"
+    
+    def _get_c_default_value(self, data_type):
+        """Get appropriate default value for C based on data type."""
+        if not data_type:
+            return "0"
+        data_type = data_type.lower()
+        if 'int' in data_type or 'uint' in data_type:
+            return "0"
+        elif 'float32' in data_type:
+            return "0.0f"
+        elif 'float64' in data_type or 'double' in data_type:
+            return "0.0"
+        elif 'bool' in data_type:
+            return "false"
+        elif 'string' in data_type or 'str' in data_type:
+            return "NULL"
+        else:
+            return "0"
+    
     def generate_code(self):
         """Generate code based on selected language."""
         if self.language.lower() == "python":
             return self._generate_python()
         elif self.language.lower() == "c":
             return self._generate_c()
+        elif self.language.lower() == "st":
+            return self._generate_st()
         else:
             return "# Unsupported language"
     
@@ -334,22 +418,37 @@ class CodeGenerator:
         if self.symbols:
             code.append("        # Initialize input variables")
             input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
-            for sym_name in input_symbols:
-                code.append(f"        self.{sym_name} = False")
+            for sym_name, sym_data in input_symbols.items():
+                data_type = sym_data.get('data_type', 'bool')
+                default_value = self._get_python_default_value(data_type)
+                code.append(f"        self.{sym_name} = {default_value}")
             
             code.append("")
             code.append("        # Initialize local variables")
             local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
-            for sym_name in local_symbols:
-                code.append(f"        self.{sym_name} = 0")
+            for sym_name, sym_data in local_symbols.items():
+                data_type = sym_data.get('data_type', 'int32')
+                default_value = self._get_python_default_value(data_type)
+                code.append(f"        self.{sym_name} = {default_value}")
             
             code.append("")
             code.append("        # Initialize output variables")
             output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
-            for sym_name in output_symbols:
-                code.append(f"        self.{sym_name} = 0")
+            for sym_name, sym_data in output_symbols.items():
+                data_type = sym_data.get('data_type', 'int32')
+                default_value = self._get_python_default_value(data_type)
+                code.append(f"        self.{sym_name} = {default_value}")
             
             code.append("")
+        code.append("        # Symbol documentation")
+        for sym_name, sym_data in self.symbols.items():
+            sym_type = sym_data.get('type', 'local')
+            data_type = sym_data.get('data_type', 'unknown')
+            description = sym_data.get('description', '')
+            code.append(f"        # {sym_name}: {sym_type} ({data_type})")
+            if description:
+                code.append(f"        #    Description: {description}")
+        code.append("")
         
         # Generate update method
         code.append("    def update(self):")
@@ -459,6 +558,7 @@ class CodeGenerator:
         code.append("")
         code.append("#include <stdio.h>")
         code.append("#include <stdbool.h>")
+        code.append("#include <stdint.h>")
         code.append("")
         
         # Generate State Enum
@@ -480,25 +580,32 @@ class CodeGenerator:
         code.append("    State current_state;")
         code.append("    State previous_state;")
         code.append("    State next_state;")
+        code.append("")
         
         # Add symbols to struct
         if self.symbols:
             code.append("    // Input variables")
             input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
-            for sym_name in input_symbols:
-                code.append(f"    bool {sym_name};")
+            for sym_name, sym_data in input_symbols.items():
+                c_type = self._get_c_type(sym_data.get('data_type', 'bool'))
+                description = sym_data.get('description', '')
+                code.append(f"    {c_type} {sym_name};  // {description}" if description else f"    {c_type} {sym_name};")
             
             code.append("    // Local variables")
             local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
-            for sym_name in local_symbols:
-                code.append(f"    int {sym_name};")
+            for sym_name, sym_data in local_symbols.items():
+                c_type = self._get_c_type(sym_data.get('data_type', 'int32'))
+                description = sym_data.get('description', '')
+                code.append(f"    {c_type} {sym_name};  // {description}" if description else f"    {c_type} {sym_name};")
             
             code.append("    // Output variables")
             output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
-            for sym_name in output_symbols:
-                code.append(f"    int {sym_name};")
+            for sym_name, sym_data in output_symbols.items():
+                c_type = self._get_c_type(sym_data.get('data_type', 'int32'))
+                description = sym_data.get('description', '')
+                code.append(f"    {c_type} {sym_name};  // {description}" if description else f"    {c_type} {sym_name};")
         
-        code.append(f"}} {struct_name};")
+        code.append("} " + struct_name + ";")
         code.append("")
         
         # Forward declarations for state functions
@@ -626,18 +733,21 @@ class CodeGenerator:
         if self.symbols:
             code.append("    // Initialize input variables")
             input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
-            for sym_name in input_symbols:
-                code.append(f"    sm->{sym_name} = false;")
+            for sym_name, sym_data in input_symbols.items():
+                default_value = self._get_c_default_value(sym_data.get('data_type', 'bool'))
+                code.append(f"    sm->{sym_name} = {default_value};")
             
             code.append("    // Initialize local variables")
             local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
-            for sym_name in local_symbols:
-                code.append(f"    sm->{sym_name} = 0;")
+            for sym_name, sym_data in local_symbols.items():
+                default_value = self._get_c_default_value(sym_data.get('data_type', 'int32'))
+                code.append(f"    sm->{sym_name} = {default_value};")
             
             code.append("    // Initialize output variables")
             output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
-            for sym_name in output_symbols:
-                code.append(f"    sm->{sym_name} = 0;")
+            for sym_name, sym_data in output_symbols.items():
+                default_value = self._get_c_default_value(sym_data.get('data_type', 'int32'))
+                code.append(f"    sm->{sym_name} = {default_value};")
         
         code.append("}")
         code.append("")
@@ -703,6 +813,185 @@ class CodeGenerator:
         code.append("")
         
         return "\n".join(code)
+    
+    def _generate_st(self):
+        """Generate Structured Text (IEC 61131-3) code from state diagram."""
+        code = []
+        code.append("(* State Machine Generated Code *)")
+        code.append("(* Language: Structured Text (IEC 61131-3) *)")
+        code.append("")
+        code.append("PROGRAM StateMachine")
+        code.append("    (* State enumeration *)")
+        
+        # Generate state constants
+        state_counter = 0
+        state_ids = {}
+        for node_id, node_data in self.nodes.items():
+            if node_data['type'] == 'state':
+                state_name = self._get_state_name(node_id)
+                state_ids[node_id] = state_name
+                code.append(f"    {state_name} : DINT := {state_counter};")
+                state_counter += 1
+        code.append("")
+        
+        # Declare variables
+        code.append("    (* State variables *)")
+        code.append("    current_state : DINT;")
+        code.append("    previous_state : DINT;")
+        code.append("    next_state : DINT;")
+        code.append("")
+        
+        # Declare input, local, and output symbols
+        if self.symbols:
+            code.append("    (* Input variables *)")
+            input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
+            for sym_name, sym_data in input_symbols.items():
+                st_type = self._get_st_type(sym_data.get('data_type', 'BOOL'))
+                description = sym_data.get('description', '')
+                code.append(f"    {sym_name} : {st_type};  (* {description} *)" if description else f"    {sym_name} : {st_type};")
+            
+            code.append("")
+            code.append("    (* Local variables *)")
+            local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
+            for sym_name, sym_data in local_symbols.items():
+                st_type = self._get_st_type(sym_data.get('data_type', 'DINT'))
+                description = sym_data.get('description', '')
+                code.append(f"    {sym_name} : {st_type};  (* {description} *)" if description else f"    {sym_name} : {st_type};")
+            
+            code.append("")
+            code.append("    (* Output variables *)")
+            output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
+            for sym_name, sym_data in output_symbols.items():
+                st_type = self._get_st_type(sym_data.get('data_type', 'DINT'))
+                description = sym_data.get('description', '')
+                code.append(f"    {sym_name} : {st_type};  (* {description} *)" if description else f"    {sym_name} : {st_type};")
+            code.append("")
+        
+        code.append("END_VAR")
+        code.append("")
+        code.append("    (* Initialize state machine *)")
+        if self.default_state and self.default_state in self.nodes:
+            initial_state = state_ids.get(self.default_state, f"STATE_{self.default_state}")
+            code.append(f"    current_state := {initial_state};")
+            code.append(f"    next_state := {initial_state};")
+        code.append("")
+        
+        # Main state machine logic
+        code.append("    (* State machine cycle *)")
+        code.append("    CASE current_state OF")
+        
+        for node_id, node_data in self.nodes.items():
+            if node_data['type'] == 'state':
+                state_name = state_ids.get(node_id)
+                code.append(f"    {state_name}:")
+                
+                sections = self._parse_code_sections(node_data.get('code', ''), indent_level=0)
+                
+                # Prefix variables with self references
+                for key in sections:
+                    sections[key] = self._prefix_variables_with_self(sections[key])
+                
+                # Convert comments to ST syntax
+                for key in sections:
+                    sections[key] = self._convert_comments_to_language(sections[key])
+                
+                code.append(f"        (* Entry code *)")
+                code.append(f"        IF previous_state <> current_state THEN")
+                if self._has_executable_code(sections['entry']):
+                    for line in sections['entry'].split('\n'):
+                        if line.strip():
+                            code.append(f"            {line}")
+                else:
+                    code.append("            (* Entry code here *)")
+                code.append(f"        END_IF;")
+                code.append("")
+                
+                code.append(f"        (* During code *)")
+                if self._has_executable_code(sections['during']):
+                    for line in sections['during'].split('\n'):
+                        if line.strip():
+                            code.append(f"        {line}")
+                else:
+                    code.append("        (* During code here *)")
+                code.append("")
+                
+                # Transitions
+                code.append(f"        (* Transitions *)")
+                transitions_list = []
+                for (start_id, end_id), connections in self.logical_connections.items():
+                    if start_id == node_id and end_id in state_ids:
+                        for conn in connections:
+                            condition = conn.get('condition', '')
+                            if condition and not condition.startswith(('//','(*')):
+                                condition = self._prefix_variables_with_self(condition)
+                                end_state_name = state_ids.get(end_id)
+                                transitions_list.append((condition, end_state_name))
+                
+                if transitions_list:
+                    for idx, (condition, end_state_name) in enumerate(transitions_list):
+                        if idx == 0:
+                            code.append(f"        IF {condition} THEN")
+                        else:
+                            code.append(f"        ELSIF {condition} THEN")
+                        code.append(f"            (* Exit code *)")
+                        exit_sections = self._parse_code_sections(node_data.get('code', ''), indent_level=2)
+                        exit_sections['exit'] = self._prefix_variables_with_self(exit_sections['exit'])
+                        exit_sections['exit'] = self._convert_comments_to_language(exit_sections['exit'])
+                        if self._has_executable_code(exit_sections['exit']):
+                            for line in exit_sections['exit'].split('\n'):
+                                if line.strip():
+                                    code.append(f"            {line}")
+                        else:
+                            code.append("            (* Exit code here *)")
+                        code.append(f"            next_state := {end_state_name};")
+                    code.append(f"        ELSE")
+                    code.append(f"            next_state := current_state;")
+                    code.append(f"        END_IF;")
+                else:
+                    code.append(f"        next_state := current_state;")
+                code.append("")
+        
+        code.append("    END_CASE;")
+        code.append("")
+        code.append("    (* Update state variables for next cycle *)")
+        code.append("    previous_state := current_state;")
+        code.append("    current_state := next_state;")
+        code.append("")
+        code.append("END_PROGRAM")
+        
+        return "\n".join(code)
+    
+    def _get_st_type(self, data_type):
+        """Map data type to IEC 61131-3 Structured Text type."""
+        if not data_type:
+            return "DINT"
+        data_type = data_type.lower()
+        if data_type == 'int8':
+            return "SINT"
+        elif data_type == 'int16':
+            return "INT"
+        elif data_type == 'int32':
+            return "DINT"
+        elif data_type == 'int64':
+            return "LINT"
+        elif data_type == 'uint8':
+            return "USINT"
+        elif data_type == 'uint16':
+            return "UINT"
+        elif data_type == 'uint32':
+            return "UDINT"
+        elif data_type == 'uint64':
+            return "ULINT"
+        elif 'float32' in data_type:
+            return "REAL"
+        elif 'float64' in data_type or 'double' in data_type:
+            return "LREAL"
+        elif 'bool' in data_type:
+            return "BOOL"
+        elif 'string' in data_type or 'str' in data_type:
+            return "STRING"
+        else:
+            return "DINT"
 
 
 def show_code_editor(parent, nodes, edges, default_state, language, logical_connections=None, symbols=None, on_close_callback=None):

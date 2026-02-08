@@ -57,6 +57,7 @@ class GraphicalMaster(tk.Tk):
         code_menu.add_cascade(label="Set Language", menu=language_menu)
         language_menu.add_radiobutton(label="Python", variable=self.language_var, value="python", command=lambda: self.set_language("python"))
         language_menu.add_radiobutton(label="C", variable=self.language_var, value="C", command=lambda: self.set_language("C"))
+        language_menu.add_radiobutton(label="ST", variable=self.language_var, value="ST", command=lambda: self.set_language("ST"))
         
         code_menu.add_command(label="Update/Show Code", command=self.show_generated_code)
         
@@ -1005,13 +1006,15 @@ class GraphicalMaster(tk.Tk):
         list_frame.pack(fill="both", expand=True, padx=5, pady=(5, 0))
         
         # Create treeview to display symbols
-        tree = ttk.Treeview(list_frame, columns=("Name", "Type", "Description"), show="headings", height=15)
+        tree = ttk.Treeview(list_frame, columns=("Name", "Type", "DataType", "Description"), show="headings", height=15)
         tree.heading("Name", text="Symbol Name")
         tree.heading("Type", text="Type")
+        tree.heading("DataType", text="Data Type")
         tree.heading("Description", text="Description")
-        tree.column("Name", width=150)
-        tree.column("Type", width=100)
-        tree.column("Description", width=300)
+        tree.column("Name", width=130)
+        tree.column("Type", width=80)
+        tree.column("DataType", width=100)
+        tree.column("Description", width=250)
         tree.pack(fill="both", expand=True)
         
         # Add scrollbar
@@ -1022,19 +1025,20 @@ class GraphicalMaster(tk.Tk):
         # Populate tree with current symbols
         for sym_name, sym_data in self.symbols.items():
             sym_type = sym_data.get('type', 'local')
+            data_type = sym_data.get('data_type', 'int32')
             description = sym_data.get('description', '')
-            tree.insert("", "end", values=(sym_name, sym_type, description))
+            tree.insert("", "end", values=(sym_name, sym_type, data_type, description))
         
         # Create frame for buttons
         button_frame = ttk.Frame(sym_window)
         button_frame.pack(fill="x", padx=5, pady=5, side="bottom")
         
-        def create_symbol_dialog(title, initial_name=None, initial_type="local", initial_desc=""):
+        def create_symbol_dialog(title, initial_name=None, initial_type="local", initial_data_type="int32", initial_desc=""):
             """Create a dialog window for adding/editing a symbol.
-            Returns: window, name_entry (or None if edit), type_var, desc_entry"""
+            Returns: window, name_entry (or None if edit), type_var, data_type_var, desc_entry"""
             dialog_window = tk.Toplevel(sym_window)
             dialog_window.title(title)
-            dialog_window.geometry("400x300")
+            dialog_window.geometry("400x380")
             
             # Symbol name
             ttk.Label(dialog_window, text="Symbol Name:").pack(anchor="w", padx=10, pady=5)
@@ -1055,17 +1059,24 @@ class GraphicalMaster(tk.Tk):
             for ttype in ["input", "output", "local"]:
                 ttk.Radiobutton(type_frame, text=ttype.capitalize(), variable=type_var, value=ttype).pack(side="left", padx=5)
             
+            # Data type selector
+            ttk.Label(dialog_window, text="Data Type:").pack(anchor="w", padx=10, pady=5)
+            data_type_var = tk.StringVar(value=initial_data_type)
+            data_types = ["int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "boolean", "string"]
+            data_type_dropdown = ttk.Combobox(dialog_window, textvariable=data_type_var, values=data_types, state="readonly", width=37)
+            data_type_dropdown.pack(padx=10, pady=5)
+            
             # Description
             ttk.Label(dialog_window, text="Description:").pack(anchor="w", padx=10, pady=5)
             desc_entry = ttk.Entry(dialog_window, width=40)
             desc_entry.insert(0, initial_desc)
             desc_entry.pack(padx=10, pady=5)
             
-            return dialog_window, name_entry, type_var, desc_entry
+            return dialog_window, name_entry, type_var, data_type_var, desc_entry
         
         def add_symbol():
             """Add a new symbol."""
-            add_window, name_entry, type_var, desc_entry = create_symbol_dialog("Add Symbol")
+            add_window, name_entry, type_var, data_type_var, desc_entry = create_symbol_dialog("Add Symbol")
             
             def save_symbol():
                 """Save the new symbol."""
@@ -1073,9 +1084,10 @@ class GraphicalMaster(tk.Tk):
                 if name:
                     self.symbols[name] = {
                         'type': type_var.get(),
+                        'data_type': data_type_var.get(),
                         'description': desc_entry.get()
                     }
-                    tree.insert("", "end", values=(name, type_var.get(), desc_entry.get()))
+                    tree.insert("", "end", values=(name, type_var.get(), data_type_var.get(), desc_entry.get()))
                     add_window.destroy()
             
             ttk.Button(add_window, text="Save", command=save_symbol).pack(side="left", padx=5, pady=10)
@@ -1099,20 +1111,22 @@ class GraphicalMaster(tk.Tk):
                 values = tree.item(item)['values']
                 sym_name = values[0]
                 
-                edit_window, _, type_var, desc_entry = create_symbol_dialog(
+                edit_window, _, type_var, data_type_var, desc_entry = create_symbol_dialog(
                     f"Edit Symbol: {sym_name}",
                     initial_name=sym_name,
                     initial_type=values[1],
-                    initial_desc=values[2]
+                    initial_data_type=values[2],
+                    initial_desc=values[3]
                 )
                 
                 def save_changes():
                     """Save changes to symbol."""
                     self.symbols[sym_name] = {
                         'type': type_var.get(),
+                        'data_type': data_type_var.get(),
                         'description': desc_entry.get()
                     }
-                    tree.item(item, values=(sym_name, type_var.get(), desc_entry.get()))
+                    tree.item(item, values=(sym_name, type_var.get(), data_type_var.get(), desc_entry.get()))
                     edit_window.destroy()
                 
                 ttk.Button(edit_window, text="Save", command=save_changes).pack(side="left", padx=5, pady=10)
@@ -1149,7 +1163,7 @@ class GraphicalMaster(tk.Tk):
             if self.symbols:
                 symbols_elem = ET.SubElement(root, "symbols")
                 for sym_name, sym_data in self.symbols.items():
-                    sym_elem = ET.SubElement(symbols_elem, "symbol", name=sym_name, type=sym_data.get('type', 'local'))
+                    sym_elem = ET.SubElement(symbols_elem, "symbol", name=sym_name, type=sym_data.get('type', 'local'), data_type=sym_data.get('data_type', 'int32'))
                     desc_elem = ET.SubElement(sym_elem, "description")
                     desc_elem.text = sym_data.get('description', '')
             
@@ -1221,10 +1235,12 @@ class GraphicalMaster(tk.Tk):
                 for sym_elem in symbols_elem.findall("symbol"):
                     sym_name = sym_elem.get("name")
                     sym_type = sym_elem.get("type", "local")
+                    sym_data_type = sym_elem.get("data_type", "int32")
                     desc_elem = sym_elem.find("description")
                     sym_desc = desc_elem.text if desc_elem is not None and desc_elem.text else ""
                     self.symbols[sym_name] = {
                         'type': sym_type,
+                        'data_type': sym_data_type,
                         'description': sym_desc
                     }
             
