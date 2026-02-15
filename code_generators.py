@@ -366,6 +366,30 @@ class CodeGenerator:
         else:
             return "0"
     
+    def _get_st_default_value(self, data_type):
+        """Get appropriate default value for Structured Text based on data type."""
+        if not data_type:
+            return "0"
+        data_type = data_type.lower()
+        if 'int' in data_type or 'uint' in data_type or 'dint' in data_type:
+            return "0"
+        elif 'float32' in data_type or 'real' in data_type:
+            return "0.0"
+        elif 'float64' in data_type or 'lreal' in data_type:
+            return "0.0"
+        elif 'bool' in data_type:
+            return "FALSE"
+        elif 'string' in data_type or 'str' in data_type:
+            return "''"
+        else:
+            return "0"
+    
+    def _remove_self_prefix(self, code_text):
+        """Remove 'self.' prefix from code - used for ST which doesn't use self prefix."""
+        if not code_text:
+            return code_text
+        return code_text.replace('self.', '')
+    
     def generate_code(self):
         """Generate code based on selected language."""
         if self.language.lower() == "python":
@@ -612,7 +636,8 @@ class CodeGenerator:
         for state_name in state_names:
             code.append(f"void entry_{state_name}({struct_name}* sm);")
             code.append(f"void during_{state_name}({struct_name}* sm);")
-            code.append(f"void check_transitions_{state_name}({struct_name}* sm);")
+            code.append(f"void exit_{state_name}({struct_name}* sm);")
+            code.append(f"bool check_transitions_{state_name}({struct_name}* sm);")
         code.append("")
         
         # Generate entry functions for each state
@@ -669,12 +694,39 @@ class CodeGenerator:
                 code.append("}")
                 code.append("")
         
-        # Generate transition check functions for each state
-        code.append("// Transition check functions - evaluate conditions and perform exit code")
+        # Generate exit functions for each state
+        code.append("// Exit functions - called when leaving a state")
         for node_id, node_data in self.nodes.items():
             if node_data['type'] == 'state':
                 state_name = state_ids_map.get(node_id)
-                code.append(f"void check_transitions_{state_name}({struct_name}* sm) {{")
+                code.append(f"void exit_{state_name}({struct_name}* sm) {{")
+                sections = self._parse_code_sections(node_data.get('code', ''), indent_level=1)
+                # Prefix variables with sm->
+                for key in sections:
+                    sections[key] = self._prefix_variables_with_self(sections[key]).replace('self.', 'sm->')
+                # Convert comments to language
+                for key in sections:
+                    sections[key] = self._convert_comments_to_language(sections[key])
+                # Add C semicolons if needed
+                for key in sections:
+                    sections[key] = self._add_c_semicolons(sections[key])
+                
+                if self._has_executable_code(sections['exit']):
+                    code.append(sections['exit'])
+                elif self._is_intentionally_empty(sections['exit']):
+                    # If marked as 'nix', preserve the intent with minimal comment
+                    code.append("    // (no code)")
+                else:
+                    code.append("    // Exit code here")
+                code.append("}")
+                code.append("")
+        
+        # Generate transition check functions for each state
+        code.append("// Transition check functions - returns true if transition occurred (EXIT->ENTRY->DURING all in one call)")
+        for node_id, node_data in self.nodes.items():
+            if node_data['type'] == 'state':
+                state_name = state_ids_map.get(node_id)
+                code.append(f"bool check_transitions_{state_name}({struct_name}* sm) {{")
                 
                 sections = self._parse_code_sections(node_data.get('code', ''), indent_level=0)
                 # Prefix variables with sm->
@@ -695,29 +747,17 @@ class CodeGenerator:
                                 # Convert Python operators to C operators
                                 condition = self._convert_operators_to_language(condition)
                                 code.append(f"    if ({condition}) {{")
-                                # Exit code
-                                exit_sections = self._parse_code_sections(node_data.get('code', ''), indent_level=2)
-                                # Prefix and convert exit code
-                                exit_sections['exit'] = self._prefix_variables_with_self(exit_sections['exit']).replace('self.', 'sm->')
-                                exit_sections['exit'] = self._convert_comments_to_language(exit_sections['exit'])
-                                # Add C semicolons if needed (multiple passes to ensure all statements are fixed)
-                                exit_sections['exit'] = self._add_c_semicolons(exit_sections['exit'])
-                                exit_sections['exit'] = self._add_c_semicolons(exit_sections['exit'])  # Extra pass to catch any missed statements
-                                
-                                if self._has_executable_code(exit_sections['exit']):
-                                    code.append(exit_sections['exit'])
-                                elif self._is_intentionally_empty(exit_sections['exit']):
-                                    # If marked as 'nix', preserve the intent with minimal comment
-                                    code.append("        // (no code)")
-                                else:
-                                    code.append("        // Exit code here")
-                                code.append(f"        sm->next_state = {end_state_name};")
-                                code.append("        return;")
+                                # OPTIMIZED: Execute exit -> entry -> during -> update state all in one call
+                                code.append(f"        exit_{state_name}(sm);  // Exit current state")
+                                code.append(f"        sm->current_state = {end_state_name};  // Update state")
+                                code.append(f"        entry_{end_state_name}(sm);  // Enter new state")
+                                code.append(f"        during_{end_state_name}(sm);  // Execute new state logic")
+                                code.append("        return true;  // Transition completed")
                                 code.append("    }")
                 
                 if not has_transition:
                     code.append("    // No transitions defined")
-                code.append("    sm->next_state = sm->current_state;")
+                code.append("    return false;  // No transition occurred")
                 code.append("}")
                 code.append("")
         
@@ -752,43 +792,46 @@ class CodeGenerator:
         code.append("}")
         code.append("")
         
-        # Generate main update function
+        # Generate main update function - OPTIMIZED for single-call transitions
         code.append(f"void {self.language.lower()}_state_machine_update({struct_name}* sm) {{")
-        code.append("    // Entry: execute when state changes")
-        code.append("    if (sm->previous_state != sm->current_state) {")
+        code.append("    // Check for state transitions first (EXIT -> ENTRY -> DURING all in one call)")
+        code.append("    bool transition_occurred = false;")
+        code.append("    switch (sm->current_state) {")
+        
+        for state_name in state_names:
+            code.append(f"        case {state_name}:")
+            code.append(f"            transition_occurred = check_transitions_{state_name}(sm);")
+            code.append("            break;")
+        
+        code.append("    }")
+        code.append("")
+        code.append("    // If no transition occurred, execute entry (first cycle) and during")
+        code.append("    if (!transition_occurred) {")
+        code.append("        // Entry: execute when state changes (first cycle)")
+        code.append("        if (sm->previous_state != sm->current_state) {")
+        code.append("            switch (sm->current_state) {")
+        
+        for state_name in state_names:
+            code.append(f"                case {state_name}:")
+            code.append(f"                    entry_{state_name}(sm);")
+            code.append("                    break;")
+        
+        code.append("            }")
+        code.append("        }")
+        code.append("")
+        code.append("        // During: execute unconditionally if no transition")
         code.append("        switch (sm->current_state) {")
         
         for state_name in state_names:
             code.append(f"            case {state_name}:")
-            code.append(f"                entry_{state_name}(sm);")
+            code.append(f"                during_{state_name}(sm);")
             code.append("                break;")
         
         code.append("        }")
         code.append("    }")
         code.append("")
-        code.append("    // During: execute unconditionally")
-        code.append("    switch (sm->current_state) {")
-        
-        for state_name in state_names:
-            code.append(f"        case {state_name}:")
-            code.append(f"            during_{state_name}(sm);")
-            code.append("            break;")
-        
-        code.append("    }")
-        code.append("")
-        code.append("    // Transitions: check conditions for state changes")
-        code.append("    switch (sm->current_state) {")
-        
-        for state_name in state_names:
-            code.append(f"        case {state_name}:")
-            code.append(f"            check_transitions_{state_name}(sm);")
-            code.append("            break;")
-        
-        code.append("    }")
-        code.append("")
-        code.append("    // Update state at end of cycle")
+        code.append("    // Update state tracking for next cycle")
         code.append("    sm->previous_state = sm->current_state;")
-        code.append("    sm->current_state = sm->next_state;")
         code.append("}")
         code.append("")
         
@@ -819,65 +862,115 @@ class CodeGenerator:
         code = []
         code.append("(* State Machine Generated Code *)")
         code.append("(* Language: Structured Text (IEC 61131-3) *)")
+        code.append("(* This code follows IEC 61131-3 conventions *)")
+        code.append("(* Variable declarations are stored separately; this file contains _INIT and _CYCLIC functions *)")
         code.append("")
-        code.append("PROGRAM StateMachine")
-        code.append("    (* State enumeration *)")
         
-        # Generate state constants
+        # Generate state constants documentation
         state_counter = 0
         state_ids = {}
         for node_id, node_data in self.nodes.items():
             if node_data['type'] == 'state':
                 state_name = self._get_state_name(node_id)
                 state_ids[node_id] = state_name
+                state_counter += 1
+        
+        code.append("(* VAR SECTION - Copy these declarations: *)")
+        code.append("VAR")
+        state_counter = 0
+        for node_id, node_data in self.nodes.items():
+            if node_data['type'] == 'state':
+                state_name = state_ids[node_id]
                 code.append(f"    {state_name} : DINT := {state_counter};")
                 state_counter += 1
-        code.append("")
-        
-        # Declare variables
-        code.append("    (* State variables *)")
         code.append("    current_state : DINT;")
         code.append("    previous_state : DINT;")
         code.append("    next_state : DINT;")
-        code.append("")
         
-        # Declare input, local, and output symbols
         if self.symbols:
-            code.append("    (* Input variables *)")
             input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
             for sym_name, sym_data in input_symbols.items():
                 st_type = self._get_st_type(sym_data.get('data_type', 'BOOL'))
-                description = sym_data.get('description', '')
-                code.append(f"    {sym_name} : {st_type};  (* {description} *)" if description else f"    {sym_name} : {st_type};")
+                code.append(f"    {sym_name} : {st_type};")
             
-            code.append("")
-            code.append("    (* Local variables *)")
             local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
             for sym_name, sym_data in local_symbols.items():
                 st_type = self._get_st_type(sym_data.get('data_type', 'DINT'))
-                description = sym_data.get('description', '')
-                code.append(f"    {sym_name} : {st_type};  (* {description} *)" if description else f"    {sym_name} : {st_type};")
+                code.append(f"    {sym_name} : {st_type};")
             
-            code.append("")
-            code.append("    (* Output variables *)")
             output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
             for sym_name, sym_data in output_symbols.items():
                 st_type = self._get_st_type(sym_data.get('data_type', 'DINT'))
-                description = sym_data.get('description', '')
-                code.append(f"    {sym_name} : {st_type};  (* {description} *)" if description else f"    {sym_name} : {st_type};")
-            code.append("")
-        
+                code.append(f"    {sym_name} : {st_type};")
         code.append("END_VAR")
         code.append("")
-        code.append("    (* Initialize state machine *)")
-        if self.default_state and self.default_state in self.nodes:
-            initial_state = state_ids.get(self.default_state, f"STATE_{self.default_state}")
-            code.append(f"    current_state := {initial_state};")
-            code.append(f"    next_state := {initial_state};")
         code.append("")
         
-        # Main state machine logic
-        code.append("    (* State machine cycle *)")
+        # ============= INIT FUNCTION =============
+        code.append("(* ============================================ *)")
+        code.append("(* INITIALIZATION FUNCTION - Called once at startup *)")
+        code.append("(* ============================================ *)")
+        code.append("PROGRAM _INIT")
+        code.append("    (* Initialize state machine and entry code of initial state *)")
+        code.append("")
+        
+        if self.default_state and self.default_state in self.nodes:
+            initial_state = state_ids.get(self.default_state)
+            initial_node = self.nodes[self.default_state]
+            code.append(f"    current_state := -1;")
+            code.append(f"    previous_state := {initial_state};")
+            code.append(f"    next_state := {initial_state};")
+            code.append("")
+            
+            # Initialize symbols
+            if self.symbols:
+                code.append("    (* Initialize input variables *)")
+                input_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'input'}
+                for sym_name, sym_data in input_symbols.items():
+                    default_value = self._get_st_default_value(sym_data.get('data_type', 'BOOL'))
+                    code.append(f"    {sym_name} := {default_value};")
+                
+                code.append("    (* Initialize local variables *)")
+                local_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'local'}
+                for sym_name, sym_data in local_symbols.items():
+                    default_value = self._get_st_default_value(sym_data.get('data_type', 'DINT'))
+                    code.append(f"    {sym_name} := {default_value};")
+                
+                code.append("    (* Initialize output variables *)")
+                output_symbols = {k: v for k, v in self.symbols.items() if v.get('type') == 'output'}
+                for sym_name, sym_data in output_symbols.items():
+                    default_value = self._get_st_default_value(sym_data.get('data_type', 'DINT'))
+                    code.append(f"    {sym_name} := {default_value};")
+                code.append("")
+            
+            # Execute entry code for initial state
+            code.append(f"    (* Entry code for initial state {initial_node['name']} *)")
+            sections = self._parse_code_sections(initial_node.get('code', ''), indent_level=1)
+            for key in sections:
+                sections[key] = self._prefix_variables_with_self(sections[key])
+                sections[key] = self._remove_self_prefix(sections[key])  # ST doesn't use self
+            for key in sections:
+                sections[key] = self._convert_comments_to_language(sections[key])
+            
+            if self._has_executable_code(sections['entry']):
+                for line in sections['entry'].split('\n'):
+                    if line.strip():
+                        code.append(f"    {line}")
+            else:
+                code.append("    (* Entry code here *)")
+        
+        code.append("END_PROGRAM")
+        code.append("")
+        code.append("")
+        
+        # ============= CYCLIC FUNCTION =============
+        code.append("(* ============================================ *)")
+        code.append("(* CYCLIC FUNCTION - Called repeatedly in infinite loop *)")
+        code.append("(* Variables retain their values between cycles *)")
+        code.append("(* ============================================ *)")
+        code.append("PROGRAM _CYCLIC")
+        code.append("    (* State machine logic with CASE for state handling *)")
+        code.append("")
         code.append("    CASE current_state OF")
         
         for node_id, node_data in self.nodes.items():
@@ -887,36 +980,16 @@ class CodeGenerator:
                 
                 sections = self._parse_code_sections(node_data.get('code', ''), indent_level=0)
                 
-                # Prefix variables with self references
+                # Prefix variables with self references, then remove them for ST
                 for key in sections:
                     sections[key] = self._prefix_variables_with_self(sections[key])
+                    sections[key] = self._remove_self_prefix(sections[key])  # ST doesn't use self
                 
                 # Convert comments to ST syntax
                 for key in sections:
                     sections[key] = self._convert_comments_to_language(sections[key])
                 
-                code.append(f"        (* Entry code *)")
-                code.append(f"        IF previous_state <> current_state THEN")
-                if self._has_executable_code(sections['entry']):
-                    for line in sections['entry'].split('\n'):
-                        if line.strip():
-                            code.append(f"            {line}")
-                else:
-                    code.append("            (* Entry code here *)")
-                code.append(f"        END_IF;")
-                code.append("")
-                
-                code.append(f"        (* During code *)")
-                if self._has_executable_code(sections['during']):
-                    for line in sections['during'].split('\n'):
-                        if line.strip():
-                            code.append(f"        {line}")
-                else:
-                    code.append("        (* During code here *)")
-                code.append("")
-                
-                # Transitions
-                code.append(f"        (* Transitions *)")
+                # Check for transitions from this state
                 transitions_list = []
                 for (start_id, end_id), connections in self.logical_connections.items():
                     if start_id == node_id and end_id in state_ids:
@@ -924,18 +997,20 @@ class CodeGenerator:
                             condition = conn.get('condition', '')
                             if condition and not condition.startswith(('//','(*')):
                                 condition = self._prefix_variables_with_self(condition)
+                                condition = self._remove_self_prefix(condition)  # ST doesn't use self
                                 end_state_name = state_ids.get(end_id)
-                                transitions_list.append((condition, end_state_name))
+                                transitions_list.append((condition, end_state_name, end_id))
                 
                 if transitions_list:
-                    for idx, (condition, end_state_name) in enumerate(transitions_list):
-                        if idx == 0:
-                            code.append(f"        IF {condition} THEN")
-                        else:
-                            code.append(f"        ELSIF {condition} THEN")
-                        code.append(f"            (* Exit code *)")
+                    # Transition conditions - separate IF statements for each transition
+                    for condition, end_state_name, end_id in transitions_list:
+                        code.append(f"        IF {condition} THEN")
+                        
+                        # EXIT code from current state
+                        code.append(f"            (* EXIT current state *)")
                         exit_sections = self._parse_code_sections(node_data.get('code', ''), indent_level=2)
                         exit_sections['exit'] = self._prefix_variables_with_self(exit_sections['exit'])
+                        exit_sections['exit'] = self._remove_self_prefix(exit_sections['exit'])
                         exit_sections['exit'] = self._convert_comments_to_language(exit_sections['exit'])
                         if self._has_executable_code(exit_sections['exit']):
                             for line in exit_sections['exit'].split('\n'):
@@ -943,21 +1018,95 @@ class CodeGenerator:
                                     code.append(f"            {line}")
                         else:
                             code.append("            (* Exit code here *)")
-                        code.append(f"            next_state := {end_state_name};")
-                    code.append(f"        ELSE")
-                    code.append(f"            next_state := current_state;")
-                    code.append(f"        END_IF;")
+                        
+                        code.append(f"")
+                        
+                        # Find the target state's entry code
+                        target_node = self.nodes.get(end_id)
+                        if target_node:
+                            # ENTRY code for new state
+                            code.append(f"            (* ENTRY new state *)")
+                            code.append(f"            current_state := {end_state_name};")
+                            entry_sections = self._parse_code_sections(target_node.get('code', ''), indent_level=2)
+                            entry_sections['entry'] = self._prefix_variables_with_self(entry_sections['entry'])
+                            entry_sections['entry'] = self._remove_self_prefix(entry_sections['entry'])
+                            entry_sections['entry'] = self._convert_comments_to_language(entry_sections['entry'])
+                            if self._has_executable_code(entry_sections['entry']):
+                                for line in entry_sections['entry'].split('\n'):
+                                    if line.strip():
+                                        code.append(f"            {line}")
+                            else:
+                                code.append("            (* Entry code here *)")
+                            
+                            code.append(f"")
+                            
+                            # DURING code for new state (executed immediately after entry)
+                            code.append(f"            (* DURING code for new state in same cycle *)")
+                            during_sections = self._parse_code_sections(target_node.get('code', ''), indent_level=2)
+                            during_sections['during'] = self._prefix_variables_with_self(during_sections['during'])
+                            during_sections['during'] = self._remove_self_prefix(during_sections['during'])
+                            during_sections['during'] = self._convert_comments_to_language(during_sections['during'])
+                            if self._has_executable_code(during_sections['during']):
+                                for line in during_sections['during'].split('\n'):
+                                    if line.strip():
+                                        code.append(f"            {line}")
+                            else:
+                                code.append("            (* During code here *)")
+                        
+                        code.append(f"        END_IF;")
+                    
+                    code.append(f"        (* DURING code for current state - appears once *)")
+                    if self._has_executable_code(sections['during']):
+                        for line in sections['during'].split('\n'):
+                            if line.strip():
+                                code.append(f"        {line}")
+                    else:
+                        code.append("        (* During code here *)")
                 else:
-                    code.append(f"        next_state := current_state;")
+                    # No transitions: check for entry and execute during
+                    code.append(f"        IF previous_state <> current_state THEN")
+                    code.append(f"            (* ENTRY code - triggered when entering this state *)")
+                    if self._has_executable_code(sections['entry']):
+                        for line in sections['entry'].split('\n'):
+                            if line.strip():
+                                code.append(f"            {line}")
+                    else:
+                        code.append("            (* Entry code here *)")
+                    code.append(f"        END_IF;")
+                    code.append(f"")
+                    code.append(f"        (* DURING code - executed every cycle - appears once *)")
+                    if self._has_executable_code(sections['during']):
+                        for line in sections['during'].split('\n'):
+                            if line.strip():
+                                code.append(f"        {line}")
+                    else:
+                        code.append("        (* During code here *)")
+                
                 code.append("")
         
         code.append("    END_CASE;")
         code.append("")
-        code.append("    (* Update state variables for next cycle *)")
+        code.append("    (* Update state tracking for next cycle *)")
         code.append("    previous_state := current_state;")
-        code.append("    current_state := next_state;")
-        code.append("")
         code.append("END_PROGRAM")
+        code.append("")
+        
+        # Add helper functions documentation
+        code.append("")
+        code.append("(* ============================================ *)")
+        code.append("(* USAGE in your PLC program: *)")
+        code.append("(* ============================================ *)")
+        code.append("(*")
+        code.append("(* In your VAR section, declare: *)")
+        code.append("(*   - State constants (see beginning of this file) *)")
+        code.append("(*   - State machine variables (current_state, previous_state, next_state) *)")
+        code.append("(*   - User-defined variables (inputs, locals, outputs) *)")
+        code.append("(*")
+        code.append("(* In your main program or task: *)")
+        code.append("(*   1. Call StateMachine_INIT() once at startup *)")
+        code.append("(*   2. Call StateMachine_CYCLIC() in a cyclic task / infinite loop *)")
+        code.append("(*")
+        code.append("(*) *)")
         
         return "\n".join(code)
     
@@ -1055,7 +1204,7 @@ def show_code_editor(parent, nodes, edges, default_state, language, logical_conn
     # Only show interactive tester button for Python
     if language.lower() == "python":
         tk.Button(button_frame, text="Interactive Tester", command=open_tester).pack(side="left", padx=2)
-    else:
+    elif language.lower() == "c":
         # For C code, show test button
         tk.Button(button_frame, text="Test C Code (Compile)", command=test_c_code).pack(side="left", padx=2)
     

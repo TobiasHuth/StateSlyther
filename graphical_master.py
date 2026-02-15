@@ -27,6 +27,9 @@ class GraphicalMaster(tk.Tk):
         self.symbols = {}  # Symbol dictionary: symbol_name -> {'type': 'input'/'output'/'local', 'description': str}
         self._resize_handle = None
         self._pan_start = None  # Track pan start position for middle mouse button
+        self._last_hover_state = None  # Track the last hover state to avoid redundant cursor updates
+        self._undo_stack = []  # Stack to store state snapshots for undo functionality
+        self._max_undo_steps = 50  # Maximum number of undo steps to keep in memory
 
         self._build_ui()
 
@@ -38,6 +41,8 @@ class GraphicalMaster(tk.Tk):
         # File menu
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Undo", command=self.undo, accelerator="Ctrl+Z")
+        file_menu.add_separator()
         file_menu.add_command(label="Save", command=self.save_layout)
         file_menu.add_command(label="Open", command=self.open_layout)
         
@@ -97,6 +102,7 @@ class GraphicalMaster(tk.Tk):
         self.canvas.bind("<ButtonPress-1>", self.on_mouse_down)
         self.canvas.bind("<B1-Motion>", self.on_mouse_move)
         self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
+        self.canvas.bind("<Motion>", self.on_mouse_hover)
         # self.canvas.bind("<Double-Button-1>", self.on_double_click)
         self.canvas.bind("<Button-3>", lambda event: self.set_mode("select"))
         self.canvas.bind("<ButtonPress-2>", self.on_pan_start)
@@ -104,6 +110,7 @@ class GraphicalMaster(tk.Tk):
         self.canvas.bind("<ButtonRelease-2>", self.on_pan_end)
         self.bind("<Delete>", lambda event: self.delete_selected())
         self.bind("<space>", lambda event: self.focus_diagram())
+        self.bind("<Control-z>", lambda event: self.undo())
 
     def update_scroll_region(self):
         """Update the canvas scroll region to fit all content with padding."""
@@ -212,6 +219,42 @@ class GraphicalMaster(tk.Tk):
             self.canvas.config(cursor="crosshair")
         elif mode in ("state", "junction"):
             self.canvas.config(cursor="cross")
+        # Reset hover state when changing modes
+        self._last_hover_state = None
+
+    def on_mouse_hover(self, event):
+        """
+        Handle mouse hover events to update cursor when hovering over valid draw targets in line mode.
+        When hovering over nodes/junctions, the cursor changes to "target" to indicate drawing is possible.
+        """
+        if self.mode != "line":
+            # Reset hover state if not in line mode
+            self._last_hover_state = None
+            return
+        
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        
+        # Check if hovering over a node
+        item = self.canvas.find_closest(x, y)
+        is_hovering_over_node = False
+        
+        if item and "node" in self.canvas.gettags(item):
+            # Check if close enough to the node's edge/boundary
+            if self._is_close(item[0], x, y, max_distance=15):
+                # Don't highlight if this is the start node (if we're already drawing)
+                if not self._start or item[0] != self._start_shape:
+                    is_hovering_over_node = True
+        
+        # Update cursor based on hover state
+        if is_hovering_over_node != (self._last_hover_state == "hovering"):
+            if is_hovering_over_node:
+                # Hovering over a valid target - use target cursor to indicate drawing is possible
+                self.canvas.config(cursor="target")
+                self._last_hover_state = "hovering"
+            else:
+                # Not hovering - use regular crosshair for line mode
+                self.canvas.config(cursor="crosshair")
+                self._last_hover_state = "normal"
 
     def _point_to_bbox_distance(self, bbox, x, y):
         if not bbox:
@@ -288,6 +331,7 @@ class GraphicalMaster(tk.Tk):
             else:
                 self._start = None
                 self._start_shape = None
+            self._last_hover_state = None  # Reset hover state when starting a line
         else:
             self._start = (x, y)
             if self.mode == "state":
@@ -392,6 +436,8 @@ class GraphicalMaster(tk.Tk):
                 # Line mode doesn't use _temp for preview
                 pass
             else:
+                # Save state before creating node
+                self._save_state_to_undo()
                 bbox = self.canvas.bbox(self._temp)
                 w = bbox[2] - bbox[0]
                 h = bbox[3] - bbox[1]
@@ -431,6 +477,8 @@ class GraphicalMaster(tk.Tk):
             if item and "node" in self.canvas.gettags(item) and item[0] != self._start_shape:
                 bbox = self.canvas.bbox(item[0])
                 if self._is_close(item[0], x, y, max_distance=15):
+                    # Save state before creating edge
+                    self._save_state_to_undo()
                     end_x, end_y = self._closest_point_on_bbox(bbox, x, y)
 
                     edge_id = self.canvas.create_line(self._start[0], self._start[1], end_x, end_y, fill="black", width=2, arrow="last", tags=("shape","edge", f"start:{self._start_shape}", f"end:{item[0]}"))
@@ -482,6 +530,7 @@ class GraphicalMaster(tk.Tk):
         self._drag_start = None
         self._dragging = False
         self._resize_handle = None
+        self._last_hover_state = None  # Reset hover state when finishing any interaction
         self.update_scroll_region()
 
     def on_double_click(self, event):
@@ -573,6 +622,8 @@ class GraphicalMaster(tk.Tk):
 
     def delete_selected(self):
         if self.selected:
+            # Save state before deleting
+            self._save_state_to_undo()
             tags = self.canvas.gettags(self.selected)
             if "edge" in tags:
                 # Remove from nodes' lists
@@ -624,6 +675,8 @@ class GraphicalMaster(tk.Tk):
             import tkinter.simpledialog as sd
             name = sd.askstring("Rename State", "Enter new name:", initialvalue=self.nodes[self.selected]['name'])
             if name is not None:
+                # Save state before renaming
+                self._save_state_to_undo()
                 self.nodes[self.selected]['name'] = name
                 self.update_text(self.selected)
 
@@ -646,6 +699,8 @@ class GraphicalMaster(tk.Tk):
             text_widget.insert("1.0", self.nodes[self.selected]['code'])
             
             def save_code():
+                # Save state before editing code
+                self._save_state_to_undo()
                 new_code = text_widget.get("1.0", "end-1c")
                 self.nodes[self.selected]['code'] = new_code
                 self.update_text(self.selected)
@@ -676,6 +731,8 @@ class GraphicalMaster(tk.Tk):
             text_widget.insert("1.0", self.edges[self.selected]['condition'])
             
             def save_condition():
+                # Save state before editing condition
+                self._save_state_to_undo()
                 new_condition = text_widget.get("1.0", "end-1c")
                 self.edges[self.selected]['condition'] = new_condition
                 condition_color = self.get_condition_text_color(new_condition)
@@ -692,6 +749,8 @@ class GraphicalMaster(tk.Tk):
 
     def set_default_state(self):
         if self.selected and self.nodes[self.selected]['type'] == 'state':
+            # Save state before changing default state
+            self._save_state_to_undo()
             # Remove green outline from old default state
             if self.default_state is not None and self.default_state != self.selected:
                 try:
@@ -1148,6 +1207,180 @@ class GraphicalMaster(tk.Tk):
         self._analyze_logical_connections()
         self.symbols = self.get_symbols()
         show_code_editor(self, self.nodes, self.edges, self.default_state, self.language, self.logical_connections, self.symbols)
+
+    def _serialize_state_to_dict(self):
+        """Serialize the current diagram state to a dictionary for undo/redo functionality."""
+        state = {
+            'language': self.language,
+            'default_state': self.default_state,
+            'symbols': {k: v.copy() for k, v in self.symbols.items()},  # Deep copy
+            'nodes': {},
+            'edges': {},
+            'canvas_items': {}
+        }
+        
+        # Store nodes data
+        for item_id, node_data in self.nodes.items():
+            state['nodes'][item_id] = {
+                'position': node_data['position'],
+                'size': node_data['size'],
+                'type': node_data['type'],
+                'name': node_data['name'],
+                'code': node_data.get('code', ''),
+                'incoming': node_data['incoming'].copy(),
+                'outgoing': node_data['outgoing'].copy(),
+                'incoming_points': {k: v for k, v in node_data['incoming_points'].items()},
+                'outgoing_points': {k: v for k, v in node_data['outgoing_points'].items()}
+            }
+        
+        # Store edges data
+        for edge_id, edge_data in self.edges.items():
+            state['edges'][edge_id] = {
+                'condition': edge_data['condition'],
+                'start_pos': edge_data['start_pos'],
+                'end_pos': edge_data['end_pos']
+            }
+        
+        return state
+
+    def _restore_state_from_dict(self, state):
+        """Restore the diagram state from a serialized dictionary."""
+        # Clear the canvas
+        self.canvas.delete("all")
+        self.nodes.clear()
+        self.edges.clear()
+        
+        # Restore basic settings
+        self.language = state['language']
+        self.language_var.set(self.language)
+        self.symbols = {k: v.copy() for k, v in state['symbols'].items()}  # Deep copy
+        
+        # Restore nodes
+        node_mapping = {}  # Map old item_ids to new canvas item_ids
+        for item_id, node_data in state['nodes'].items():
+            x, y = node_data['position']
+            w, h = node_data['size']
+            node_type = node_data['type']
+            
+            # Create canvas item
+            if node_type == 'state':
+                canvas_item = self.canvas.create_rectangle(x, y, x+w, y+h, outline="black", tags=("shape","node"))
+            else:  # junction
+                canvas_item = self.canvas.create_oval(x, y, x+w, y+h, outline="black", tags=("shape","node"))
+            
+            # Store node data
+            self.nodes[canvas_item] = {
+                'position': node_data['position'],
+                'size': node_data['size'],
+                'type': node_type,
+                'name': node_data['name'],
+                'code': node_data['code'],
+                'incoming': [],
+                'outgoing': [],
+                'incoming_points': {},
+                'outgoing_points': {}
+            }
+            
+            node_mapping[item_id] = canvas_item
+            
+            # Update text if it's a state
+            if node_type == 'state':
+                self.update_text(canvas_item)
+        
+        # Apply default state styling
+        self.default_state = state['default_state']
+        if self.default_state is not None and self.default_state in node_mapping:
+            self.default_state = node_mapping[self.default_state]
+            self.canvas.itemconfig(self.default_state, outline="green", width=2)
+        
+        # Restore edges
+        for edge_id, edge_data in state['edges'].items():
+            # Extract start and end node info from edges
+            # We need to find the nodes that this edge connects
+            # This is tricky because we need to map the old connections to new ones
+            pass
+        
+        # Recursively reconstruct edges based on node connections
+        for old_item_id, node_data in state['nodes'].items():
+            new_item_id = node_mapping[old_item_id]
+            
+            for old_outgoing_edge_id in node_data['outgoing']:
+                if old_outgoing_edge_id in state['edges']:
+                    # Find the end node for this edge
+                    for old_end_item_id, end_node_data in state['nodes'].items():
+                        if old_outgoing_edge_id in end_node_data['incoming']:
+                            new_end_item_id = node_mapping[old_end_item_id]
+                            
+                            # Create the edge
+                            rel_start = state['nodes'][old_item_id]['outgoing_points'].get(old_outgoing_edge_id, (0.5, 0.5))
+                            rel_end = end_node_data['incoming_points'].get(old_outgoing_edge_id, (0.5, 0.5))
+                            
+                            # Calculate absolute positions
+                            start_bbox = self.canvas.bbox(new_item_id)
+                            start_x = start_bbox[0] + rel_start[0] * (start_bbox[2] - start_bbox[0])
+                            start_y = start_bbox[1] + rel_start[1] * (start_bbox[3] - start_bbox[1])
+                            
+                            end_bbox = self.canvas.bbox(new_end_item_id)
+                            end_x = end_bbox[0] + rel_end[0] * (end_bbox[2] - end_bbox[0])
+                            end_y = end_bbox[1] + rel_end[1] * (end_bbox[3] - end_bbox[1])
+                            
+                            # Create line
+                            new_edge_id = self.canvas.create_line(start_x, start_y, end_x, end_y, fill="black", width=2, arrow="last", tags=("shape","edge", f"start:{new_item_id}", f"end:{new_end_item_id}"))
+                            
+                            # Update node references
+                            self.nodes[new_item_id]['outgoing'].append(new_edge_id)
+                            self.nodes[new_item_id]['outgoing_points'][new_edge_id] = rel_start
+                            self.nodes[new_end_item_id]['incoming'].append(new_edge_id)
+                            self.nodes[new_end_item_id]['incoming_points'][new_edge_id] = rel_end
+                            
+                            # Create condition text
+                            mid_x = (start_x + end_x) / 2
+                            mid_y = (start_y + end_y) / 2
+                            
+                            condition_text = state['edges'][old_outgoing_edge_id]['condition']
+                            condition_color = self.get_condition_text_color(condition_text)
+                            condition_text_id = self.canvas.create_text(mid_x, mid_y, text=condition_text, font=("Courier", 9), fill=condition_color, tags=("shape", "condition", f"condition_of:{new_edge_id}"))
+                            
+                            # Create background rectangle
+                            text_bbox = self.canvas.bbox(condition_text_id)
+                            bg_rect_id = None
+                            if text_bbox:
+                                bg_rect_id = self.canvas.create_rectangle(
+                                    text_bbox[0] - 3, text_bbox[1] - 3, text_bbox[2] + 3, text_bbox[3] + 3,
+                                    fill="#e9e9e9", outline="#849eaf", tags=("shape", "condition_bg")
+                                )
+                                self.canvas.tag_lower(bg_rect_id, condition_text_id)
+                            
+                            # Store edge data
+                            self.edges[new_edge_id] = {
+                                'condition': condition_text,
+                                'condition_text_id': condition_text_id,
+                                'condition_bg_id': bg_rect_id,
+                                'start_pos': (start_x, start_y),
+                                'end_pos': (end_x, end_y)
+                            }
+                            break
+        
+        self.update_scroll_region()
+        self._deselect()
+
+    def _save_state_to_undo(self):
+        """Save the current state to the undo stack."""
+        state = self._serialize_state_to_dict()
+        self._undo_stack.append(state)
+        
+        # Limit the size of the undo stack
+        if len(self._undo_stack) > self._max_undo_steps:
+            self._undo_stack.pop(0)
+
+    def undo(self):
+        """Undo the last action by restoring the previous state."""
+        if len(self._undo_stack) > 0:
+            state = self._undo_stack.pop()
+            self._restore_state_from_dict(state)
+        else:
+            # Optionally show a message that there's nothing to undo
+            pass
 
     def save_layout(self):
         file = fd.asksaveasfilename(defaultextension=".lyt", filetypes=[("Layout files", "*.lyt")])

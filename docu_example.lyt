@@ -1,22 +1,22 @@
 <?xml version='1.0' encoding='utf-8'?>
 <layout>
-  <language value="python" />
+  <language value="C" />
   <default_state id="1" />
   <symbols>
-    <symbol name="my_var" type="local">
+    <symbol name="my_var" type="local" data_type="int32">
       <description />
     </symbol>
-    <symbol name="your_var" type="local">
+    <symbol name="your_var" type="local" data_type="int32">
       <description />
     </symbol>
-    <symbol name="start" type="input">
+    <symbol name="start" type="input" data_type="int32">
       <description />
     </symbol>
-    <symbol name="abort" type="input">
+    <symbol name="abort" type="input" data_type="int32">
       <description />
     </symbol>
   </symbols>
-  <node id="1" x="367" y="93" w="200" h="148" type="state" name="First_state">
+  <node id="1" x="367.0" y="93.0" w="200.0" h="148.0" type="state" name="First_state">
     <code>entry:
   my_var = 0
 during:
@@ -25,7 +25,7 @@ exit:
   my_var = my_var * (-1)
 </code>
   </node>
-  <node id="6" x="936" y="99" w="198" h="143" type="state" name="Second_state">
+  <node id="6" x="936.0" y="99.0" w="198.0" h="143.0" type="state" name="Second_state">
     <code>entry:
   your_var = 100
 during:
@@ -34,21 +34,21 @@ exit:
 // do nothing here
 </code>
   </node>
-  <node id="246" x="647" y="184" w="22" h="22" type="junction" name="" />
-  <node id="696" x="754" y="162" w="20" h="20" type="junction" name="" />
+  <node id="11" x="647.0" y="184.0" w="22.0" h="22.0" type="junction" name="" />
+  <node id="12" x="754.0" y="162.0" w="20.0" h="20.0" type="junction" name="" />
   <edge start="1" end="6" start_rel_x="0.9971751412429378" start_rel_y="0.3181818181818182" end_rel_x="0.005681818181818182" end_rel_y="0.2631578947368421">
     <condition>start</condition>
   </edge>
-  <edge start="246" end="1" start_rel_x="0.18181818181818182" start_rel_y="0.5" end_rel_x="0.9915254237288136" end_rel_y="0.7012987012987013">
+  <edge start="11" end="1" start_rel_x="0.18181818181818182" start_rel_y="0.5" end_rel_x="0.9915254237288136" end_rel_y="0.7012987012987013">
     <condition>//none</condition>
   </edge>
-  <edge start="6" end="246" start_rel_x="0.002840909090909091" start_rel_y="0.9473684210526315" end_rel_x="0.9545454545454546" end_rel_y="0.7272727272727273">
+  <edge start="6" end="11" start_rel_x="0.002840909090909091" start_rel_y="0.9473684210526315" end_rel_x="0.9545454545454546" end_rel_y="0.7272727272727273">
     <condition>abort</condition>
   </edge>
-  <edge start="6" end="696" start_rel_x="0.0" start_rel_y="0.3815789473684211" end_rel_x="1.0" end_rel_y="0.5454545454545454">
+  <edge start="6" end="12" start_rel_x="0.0" start_rel_y="0.3815789473684211" end_rel_x="1.0" end_rel_y="0.5454545454545454">
     <condition>your_var &lt;= 1</condition>
   </edge>
-  <edge start="696" end="246" start_rel_x="0.0" start_rel_y="0.5" end_rel_x="0.9545454545454546" end_rel_y="0.2727272727272727">
+  <edge start="12" end="11" start_rel_x="0.0" start_rel_y="0.5" end_rel_x="0.9545454545454546" end_rel_y="0.2727272727272727">
     <condition>start</condition>
   </edge>
 </layout>
