@@ -172,7 +172,54 @@ class CodeGenerator:
             code_text = re.sub(r'!\s*([a-zA-Z_])', r'not \1', code_text)
         
         return code_text
-    
+
+    def _convert_assignments_to_st(self, code_text):
+        """
+        Convert Python/C assignment and equality operators to ST (IEC 61131-3) syntax.
+
+        Python/C  ->  ST
+        ':='           ':='  (kept, already valid ST)
+        '=='           '='   (equality check)
+        '!='           '<>'  (not equal)
+        '='            ':='  (assignment)
+        'and'/'&&'     'AND'
+        'or' /'||'     'OR'
+        'not '/'!'     'NOT '
+        """
+        if not code_text:
+            return code_text
+
+        import re
+
+        # 1. Protect already-valid ST assignments so they survive step 4
+        code_text = code_text.replace(':=', '\x00ST_ASSIGN\x00')
+
+        # 2. Convert equality check '==' -> placeholder, so step 4 won't touch it
+        code_text = code_text.replace('==', '\x00EQ\x00')
+
+        # 3. Convert '!=' -> '<>'
+        code_text = code_text.replace('!=', '<>')
+
+        # 4. Convert remaining '=' (assignment) -> ':='
+        #    Lookbehind ensures we don't touch '<=' or '>='
+        code_text = re.sub(r'(?<![<>])=', ':=', code_text)
+
+        # 5. Restore placeholders
+        code_text = code_text.replace('\x00EQ\x00', '=')        # equality '=' in ST
+        code_text = code_text.replace('\x00ST_ASSIGN\x00', ':=')
+
+        # 6. Convert logical operators to ST uppercase keywords
+        code_text = re.sub(r'\band\b', 'AND', code_text)
+        code_text = re.sub(r'\bor\b', 'OR', code_text)
+        code_text = re.sub(r'\bnot\b\s*', 'NOT ', code_text)
+
+        # 7. Also handle C-style operators if present
+        code_text = code_text.replace('&&', 'AND')
+        code_text = code_text.replace('||', 'OR')
+        code_text = re.sub(r'!\s*([a-zA-Z_(])', r'NOT \1', code_text)
+
+        return code_text
+
     def _add_c_semicolons(self, code_text):
         """
         Add missing semicolons to C code lines that need them.
@@ -876,13 +923,16 @@ class CodeGenerator:
                 state_counter += 1
         
         code.append("(* VAR SECTION - Copy these declarations: *)")
-        code.append("VAR")
+        code.append("VAR CONSTANT")
         state_counter = 0
         for node_id, node_data in self.nodes.items():
             if node_data['type'] == 'state':
                 state_name = state_ids[node_id]
                 code.append(f"    {state_name} : DINT := {state_counter};")
                 state_counter += 1
+        code.append("END_VAR")
+        code.append("")
+        code.append("VAR")
         code.append("    current_state : DINT;")
         code.append("    previous_state : DINT;")
         code.append("    next_state : DINT;")
@@ -951,6 +1001,7 @@ class CodeGenerator:
                 sections[key] = self._remove_self_prefix(sections[key])  # ST doesn't use self
             for key in sections:
                 sections[key] = self._convert_comments_to_language(sections[key])
+                sections[key] = self._convert_assignments_to_st(sections[key])
             
             if self._has_executable_code(sections['entry']):
                 for line in sections['entry'].split('\n'):
@@ -985,9 +1036,10 @@ class CodeGenerator:
                     sections[key] = self._prefix_variables_with_self(sections[key])
                     sections[key] = self._remove_self_prefix(sections[key])  # ST doesn't use self
                 
-                # Convert comments to ST syntax
+                # Convert comments and operators to ST syntax
                 for key in sections:
                     sections[key] = self._convert_comments_to_language(sections[key])
+                    sections[key] = self._convert_assignments_to_st(sections[key])
                 
                 # Check for transitions from this state
                 transitions_list = []
@@ -998,6 +1050,7 @@ class CodeGenerator:
                             if condition and not condition.startswith(('//','(*')):
                                 condition = self._prefix_variables_with_self(condition)
                                 condition = self._remove_self_prefix(condition)  # ST doesn't use self
+                                condition = self._convert_assignments_to_st(condition)
                                 end_state_name = state_ids.get(end_id)
                                 transitions_list.append((condition, end_state_name, end_id))
                 
@@ -1012,6 +1065,7 @@ class CodeGenerator:
                         exit_sections['exit'] = self._prefix_variables_with_self(exit_sections['exit'])
                         exit_sections['exit'] = self._remove_self_prefix(exit_sections['exit'])
                         exit_sections['exit'] = self._convert_comments_to_language(exit_sections['exit'])
+                        exit_sections['exit'] = self._convert_assignments_to_st(exit_sections['exit'])
                         if self._has_executable_code(exit_sections['exit']):
                             for line in exit_sections['exit'].split('\n'):
                                 if line.strip():
@@ -1031,6 +1085,7 @@ class CodeGenerator:
                             entry_sections['entry'] = self._prefix_variables_with_self(entry_sections['entry'])
                             entry_sections['entry'] = self._remove_self_prefix(entry_sections['entry'])
                             entry_sections['entry'] = self._convert_comments_to_language(entry_sections['entry'])
+                            entry_sections['entry'] = self._convert_assignments_to_st(entry_sections['entry'])
                             if self._has_executable_code(entry_sections['entry']):
                                 for line in entry_sections['entry'].split('\n'):
                                     if line.strip():
@@ -1046,6 +1101,7 @@ class CodeGenerator:
                             during_sections['during'] = self._prefix_variables_with_self(during_sections['during'])
                             during_sections['during'] = self._remove_self_prefix(during_sections['during'])
                             during_sections['during'] = self._convert_comments_to_language(during_sections['during'])
+                            during_sections['during'] = self._convert_assignments_to_st(during_sections['during'])
                             if self._has_executable_code(during_sections['during']):
                                 for line in during_sections['during'].split('\n'):
                                     if line.strip():
